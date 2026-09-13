@@ -1,0 +1,20 @@
+{
+  "bits": 6,
+  "weights": {
+    "features.0.weight": "ap_fixed<6,1>",
+    "features.3.weight": "ap_fixed<6,0>",
+    "lstm.weight_ih_l0": "ap_fixed<6,0>",
+    "lstm.weight_hh_l0": "ap_fixed<6,0>",
+    "head.1.weight": "ap_fixed<6,0>",
+    "head.3.weight": "ap_fixed<6,1>"
+  },
+  "activations": {
+    "features.0.out": "ap_fixed<6,4>",
+    "features.2.out": "ap_fixed<6,5>",
+    "features.3.out": "ap_fixed<6,6>",
+    "features.5.out": "ap_fixed<6,5>",
+    "head.1.out": "ap_fixed<6,4>",
+    "head.2.out": "ap_fixed<6,4>",
+    "head.3.out": "ap_fixed<6,5>"
+  }
+}

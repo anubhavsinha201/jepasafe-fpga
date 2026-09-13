@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+fpga_project/
+venv/
+.venv/
+
+# Datasets and large artifacts
+data/raw/*
+data/processed/*
+!data/**/.gitkeep
+!data/README.md
+
+# Dataset unzipped at the repo root (270 MB) — see DATASET_CANDIDATES in demopart.py
+UCI-HAR Dataset/
+UCI HAR Dataset/
+
+# Model artifacts (keep the dirs, not the weights)
+models/**/*.h5
+models/**/*.keras
+models/**/*.npy
+models/**/*.pb
+!models/**/.gitkeep
+!models/README.md
+
+# hls4ml generated projects
+hls/*
+!hls/.gitkeep
+
+# Simulation output
+sim/*
+!sim/.gitkeep
+*.vcd
+*.vvp
+a.out
+
+# Gowin EDA
+impl/
+*.fs
+*.rpt.html
+*.log
+project_process_config.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
