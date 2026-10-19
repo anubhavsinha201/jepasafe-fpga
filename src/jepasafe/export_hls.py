@@ -34,12 +34,13 @@ import hls4ml
 from tensorflow import keras
 
 from .config import CHECKPOINTS, HLS, HLS_DIR
+from .make_tb_data import INPUT_DAT, OUTPUT_DAT, TB_DIR
 
 # ZCU104. Verified present in this Vivado/Vitis 2023.2 install.
 DEFAULT_PART = "xczu7ev-ffvc1156-2-e"
 
 
-def build_config(model, precision: str, parallelism: int):
+def build_config(model, precision: str, parallelism: int, tb_dir: Path = TB_DIR):
     """Per-layer ReuseFactor = MACs/parallelism, i.e. `parallelism` multipliers.
 
     ReuseFactor has to divide the layer's MACs-per-call exactly or hls4ml
@@ -63,6 +64,22 @@ def build_config(model, precision: str, parallelism: int):
         layer_config["ReuseFactor"] = max(1, macs // parallelism)
         if layer.__class__.__name__ == "LSTM":
             layer_config["static"] = True
+
+    # Point the writer at the csim/cosim vectors. Without these two keys
+    # write_test_bench() creates tb_data/ and leaves it empty, and
+    # jepasafe_test.cpp then falls through to its fill_zero branch -- which is
+    # how a cosim run can report "Pass" having classified nothing but a window
+    # of zeros. Generate them with:  python -m jepasafe.make_tb_data make
+    features, predictions = tb_dir / INPUT_DAT, tb_dir / OUTPUT_DAT
+    if features.exists() and predictions.exists():
+        config["InputData"] = str(features)
+        config["OutputPredictions"] = str(predictions)
+    else:
+        print(
+            f"WARNING: {tb_dir} has no testbench vectors, so tb_data/ will be\n"
+            f"         empty and csim/cosim will run on an all-zero window.\n"
+            f"         Fix with: python -m jepasafe.make_tb_data make"
+        )
 
     return config
 
