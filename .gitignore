@@ -63,3 +63,6 @@ report/*.out
 report/*.toc
 report/*.fls
 report/*.fdb_latexmk
+
+# Icarus work dir for the RTL-vs-C check (regenerate: python scripts/tv_to_hex.py)
+sim/jepasafe_rtl/
