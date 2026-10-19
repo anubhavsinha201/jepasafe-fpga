@@ -66,3 +66,6 @@ report/*.fdb_latexmk
 
 # Icarus work dir for the RTL-vs-C check (regenerate: python scripts/tv_to_hex.py)
 sim/jepasafe_rtl/
+
+# Vivado synth/impl output (regenerate: scripts/vivado_top_impl.tcl)
+vivado/
