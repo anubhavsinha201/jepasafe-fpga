@@ -10,8 +10,8 @@ part that matters for the report, so write them down while they're fresh.
 **Date:** _______________
 
 **Tasks Completed:**
-- [ ] Ordered Tang Nano 9K
-- [ ] Installed Gowin IDE
+- [ ] Obtained ZCU104 (lab or purchase)
+- [ ] Installed Vivado / Vitis HLS 2023.2
 - [ ] Installed Python environment
 - [ ] Ran LED Blinker tutorial
 
@@ -51,7 +51,7 @@ part that matters for the report, so write them down while they're fresh.
 **Tasks Completed:**
 - [ ] Downloaded dataset (UCI HAR / EdgeFall / BandX)
 - [ ] Trained model in Python
-- [ ] Applied quantization with QKeras
+- [ ] Chose fixed-point precision (hls4ml config, not QKeras)
 - [ ] Tested anomaly detection threshold
 
 **Metrics:** float AUC ____ / quantized AUC ____ / threshold ____
@@ -72,11 +72,11 @@ part that matters for the report, so write them down while they're fresh.
 
 **Tasks Completed:**
 - [ ] Generated HLS C++ code with hls4ml
-- [ ] Synthesized in Gowin IDE
+- [ ] Packaged HLS IP and built the Vivado block design
 - [ ] Generated bitstream
 - [ ] Debugged resource issues
 
-**Resource usage:** ____ / 8,640 LUT4 · ____ / 20 DSP
+**Resource usage:** ____ / 230,400 LUT · ____ / 1,728 DSP · ____ / 624 BRAM_18K  (XCZU7EV)
 
 **Challenges Faced:**
 1.
@@ -110,8 +110,8 @@ part that matters for the report, so write them down while they're fresh.
 
 ## Final Checklist
 
-- [ ] Working LED Blinker on Tang Nano 9K
-- [ ] Trained and quantized model in Python
+- [ ] Hello-world design running on the ZCU104
+- [ ] Trained model + fixed-point accuracy measured
 - [ ] Synthesized bitstream for the model
 - [ ] Functional inference on the FPGA
 - [ ] Sensor integration (or testbench simulation)
@@ -119,4 +119,4 @@ part that matters for the report, so write them down while they're fresh.
 - [ ] Documentation and presentation materials
 - [ ] All code on GitHub (public or private)
 - [ ] A demo video (2-3 minutes)
-- [ ] A clear explanation of the flow: Train → Quantize → hls4ml → FPGA
+- [ ] A clear explanation of the flow: Train → hls4ml → Vitis HLS → Vivado → ZCU104

@@ -1,7 +1,6 @@
 # Core training stack
-tensorflow>=2.14,<2.16
+tensorflow>=2.14
 keras>=2.14
-qkeras>=0.9.0
 
 # ML -> HLS
 hls4ml>=1.0.0

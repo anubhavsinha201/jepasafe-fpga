@@ -1,0 +1,1053 @@
+% JEPASafe mini-project report
+% Compile:  pdflatex jepasafe_report.tex   (run twice for the ToC/refs)
+%      or:  latexmk -pdf jepasafe_report.tex
+%
+% TODO before submission: fill in the author names and roll numbers below,
+% and verify every reference in Section 10 against the real publication.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Mini Project Report}
+\rhead{FPGA Accelerator for Human Activity Recognition}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  rulecolor=\color{gray!50},
+  columns=fullflexible,
+}
+
+\title{\textbf{Design and FPGA Implementation of a 1D~CNN--LSTM\\
+Accelerator for Real-Time Human Activity Recognition}}
+
+% TODO: replace with the actual team
+\author{Anubhav (ROLL\_NO) \\
+National Institute of Technology, Tiruchirappalli}
+
+\date{October 18, 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This project presents the design, hardware translation and resource
+characterisation of a compact 1D~convolutional--recurrent neural network for
+human activity recognition from inertial sensor data, targeting a Xilinx
+Zynq~UltraScale+ MPSoC. A 1D~CNN front end followed by an LSTM classifier is
+trained on the UCI~HAR dataset and reaches 90.91\% test accuracy using only
+4{,}374 parameters across six sensor channels. The trained network is converted
+to synthesisable C++ using \texttt{hls4ml}, compiled to register-transfer level
+by Vitis~HLS and packaged as an AXI4-Stream IP core. Post-synthesis
+characterisation on the XCZU7EV device reports 33{,}500~LUT (14\% of the part),
+54~DSP slices (3\%), 159 block~RAMs (25\%) and an inference latency of
+1.60\,ms at 100\,MHz, against a 2.56\,s input window --- a margin of three
+orders of magnitude. The work additionally quantifies how high-level synthesis
+configuration, rather than network size, dominates hardware cost: a single
+change of activation layer construct reduced the two activation blocks from
+222{,}550~LUT to 2{,}182~LUT, and selecting a streaming interface over a
+parallel one reduced the complete design from approximately 298{,}000~LUT to
+35{,}745~LUT. The quantization strategy is documented in full, including a derivation of
+\texttt{hls4ml}'s automatic accumulator widening that reproduces all four
+generated accumulator types exactly. A negative result is also reported: the
+design does not fit a low-cost Gowin GW1NR-9 device, because the LSTM's sigmoid and tanh lookup
+tables alone require more block~RAM than that device contains. Results in this
+report are high-level-synthesis estimates; bitstream generation and on-board
+deployment remain future work.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Human activity recognition (HAR) from body-worn inertial sensors underpins
+applications in healthcare monitoring, fall detection and personal safety
+devices. Such systems are typically battery-powered and latency-sensitive,
+which motivates performing inference at the edge rather than transmitting raw
+sensor streams to a server.
+
+Field-programmable gate arrays (FPGAs) are attractive for this role. Unlike a
+general-purpose processor, an FPGA executes a neural network as dedicated
+parallel hardware, and unlike a fixed-function ASIC it can be reprogrammed as
+the model evolves. The difficulty is that translating a trained network into
+efficient hardware is not automatic: the same network can differ in area by two
+orders of magnitude depending on how it is mapped.
+
+This project builds the complete translation chain --- train, convert,
+synthesise, package --- for a 1D~CNN--LSTM activity classifier, and measures
+what each stage actually costs in hardware. The specific contributions are:
+
+\begin{enumerate}
+  \item A compact CNN--LSTM achieving 90.91\% six-class accuracy on UCI~HAR
+        using 4{,}374 parameters and only the six sensor channels an MPU6050
+        physically provides.
+  \item A complete, reproducible \texttt{hls4ml}~$\rightarrow$~Vitis~HLS
+        $\rightarrow$ Vivado~IP flow, with the generated core's interface
+        characterised at the port level.
+  \item Quantitative resource characterisation across interface type,
+        arithmetic precision, activation-table size and network width,
+        isolating which choices matter and which do not.
+  \item A documented negative result establishing why gated recurrence is
+        infeasible on a small ($<$10k~LUT) FPGA, with the block~RAM accounting
+        that explains it.
+\end{enumerate}
+
+\section{Related Work}
+
+\subsection{Deep learning for sensor-based activity recognition}
+
+The combination of convolutional feature extraction with recurrent temporal
+modelling is the established architecture for wearable HAR. Ordóñez and
+Roggen~\cite{ordonez2016} introduced DeepConvLSTM, stacking 1D~convolutional
+layers beneath LSTM layers, and demonstrated that the convolutional front end
+learns local motion primitives while the recurrent stage captures their
+temporal ordering. Hammerla et al.~\cite{hammerla2016} systematically compared
+deep, convolutional and recurrent models across wearable HAR benchmarks and
+found recurrent architectures particularly effective for the naturalistic,
+variable-duration activities typical of this domain.
+
+The architecture used here follows that lineage directly, but at drastically
+reduced width. Where DeepConvLSTM employs 64 convolutional filters and
+128~hidden units, this work targets 16 of each, because the parameter budget is
+set by on-chip memory rather than by accuracy alone.
+
+\subsection{The UCI HAR benchmark}
+
+Anguita et al.~\cite{anguita2013} published the UCI~HAR dataset, comprising
+recordings from 30~participants performing six activities with a waist-mounted
+smartphone sampled at 50\,Hz. Its wide adoption provides published baselines for
+comparison, which is the reason it was selected here over sensor-matched
+alternatives. Its principal limitation for this project is discussed in
+Section~\ref{sec:limitations}: it contains no fall or distress class.
+
+\subsection{Neural network inference on FPGAs}
+
+Two toolflows dominate academic FPGA inference. FINN, introduced by Umuroglu et
+al.~\cite{umuroglu2017}, targets heavily quantised (binarised) networks and
+generates streaming dataflow architectures. \texttt{hls4ml}, introduced by
+Duarte et al.~\cite{duarte2018} for microsecond-latency inference in particle
+physics triggers, converts Keras and PyTorch models into Vivado/Vitis~HLS C++
+and exposes per-layer control over fixed-point precision and multiplier reuse.
+
+This project uses \texttt{hls4ml} because its reuse-factor abstraction maps
+cleanly onto the design question here: the available latency budget (2.56\,s) is
+enormous relative to the computation, so the appropriate strategy is to trade
+all of that latency for reduced area. Section~\ref{sec:results} shows this
+trade is worth roughly an order of magnitude.
+
+\subsection{Joint-embedding predictive architectures}
+
+The project was initially scoped around a Transformer-based joint-embedding
+predictive architecture (JEPA), following LeCun's
+proposal~\cite{lecun2022} and the image-domain realisation of Assran et
+al.~\cite{assran2023}. That direction was abandoned early: self-attention and
+layer normalisation are expensive to synthesise, and the self-supervised
+pre-training that gives JEPA its advantage requires far more unlabelled data
+than this project could collect. The supervised CNN--LSTM was adopted instead.
+The project name retains the original acronym for continuity with earlier
+documentation.
+
+\section{Theoretical Background}
+
+\subsection{Inertial sensing and windowing}
+
+A six-axis inertial measurement unit reports linear acceleration along three
+orthogonal axes and angular velocity about those same axes. Activity is not
+identifiable from an instantaneous sample; it is a property of a time interval.
+The signal is therefore segmented into fixed-length windows. At the UCI~HAR
+sampling rate of 50\,Hz, the 128-sample window used here spans
+
+\begin{equation}
+T_{\text{window}} = \frac{128\ \text{samples}}{50\ \text{Hz}} = 2.56\ \text{s},
+\end{equation}
+
+long enough to contain several gait cycles. This figure sets the real-time
+constraint: inference must complete within 2.56\,s to keep pace with the sensor.
+
+\subsection{1D convolution for time series}
+
+A 1D convolutional layer slides $F$ learned kernels of length $k$ along the time
+axis, each spanning all $C$ input channels. With no padding, an input of $T$
+time steps produces
+
+\begin{equation}
+T_{\text{out}} = T - k + 1
+\end{equation}
+
+output steps and requires
+
+\begin{equation}
+\text{MACs} = T_{\text{out}} \times k \times C \times F
+\end{equation}
+
+multiply--accumulate operations. This expression matters for hardware: the MAC
+count, not the parameter count, determines arithmetic cost, and the factor
+$T_{\text{out}}$ is precisely what the streaming interface of
+Section~\ref{sec:iostream} avoids unrolling.
+
+\subsection{Long short-term memory}
+
+An LSTM cell~\cite{hochreiter1997} maintains a cell state $c_t$ regulated by
+three gates. For input $x_t$ and previous hidden state $h_{t-1}$:
+
+\begin{align}
+i_t &= \sigma(W_i x_t + U_i h_{t-1} + b_i) \\
+f_t &= \sigma(W_f x_t + U_f h_{t-1} + b_f) \\
+o_t &= \sigma(W_o x_t + U_o h_{t-1} + b_o) \\
+\tilde{c}_t &= \tanh(W_c x_t + U_c h_{t-1} + b_c) \\
+c_t &= f_t \odot c_{t-1} + i_t \odot \tilde{c}_t \\
+h_t &= o_t \odot \tanh(c_t)
+\end{align}
+
+Two consequences are central to this report. First, the gating requires both a
+sigmoid and a hyperbolic tangent, neither of which is cheap in fixed-point
+hardware --- both are realised as lookup tables. Second, there are four weight
+matrices of each kind, so a cell with $H$ hidden units over $n$ inputs holds
+$4H(n + H)$ weights and evaluates $4H$ nonlinearities per time step. The
+hardware consequence of that factor of four is measured in
+Section~\ref{sec:tables}.
+
+\subsection{Batch normalisation and its folding}
+
+Batch normalisation~\cite{ioffe2015} applies, at inference time, a fixed affine
+transform per channel:
+
+\begin{equation}
+y = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta .
+\end{equation}
+
+Because this is affine and immediately follows a convolution, which is also
+affine, the two can be composed into a single convolution with modified weights
+and a bias. The synthesis tool performs this automatically, so batch
+normalisation costs nothing in hardware. The convolutions in this design are
+therefore declared without bias terms, since the folded $\beta$ supplies them.
+
+\subsection{Fixed-point arithmetic}
+
+FPGAs implement floating-point arithmetic only at considerable cost, so
+inference is performed in fixed point. The notation
+\texttt{ap\_fixed<W,I>} denotes a $W$-bit signed value with $I$ integer bits and
+$W - I$ fractional bits, giving a resolution of $2^{-(W-I)}$ and a range of
+$\pm 2^{I-1}$. This design uses \texttt{ap\_fixed<16,6>} throughout. The representation, its
+rounding and overflow modes, and the automatic widening of intermediate
+accumulators are treated in full in Section~\ref{sec:quant}.
+
+\subsection{Reuse factor}
+
+The reuse factor $R$ specifies how many times a single hardware multiplier is
+re-used within a layer. For a layer of $N$ MACs, the synthesised design
+instantiates $N/R$ multipliers and takes $R$ cycles. Setting $R = N$ yields one
+multiplier operating fully sequentially --- minimum area, maximum latency.
+Given the 2.56\,s budget, this is the correct operating point for every layer in
+this design.
+
+\section{System Description}
+
+\subsection{Overall architecture}
+
+\begin{verbatim}
+   MPU6050 (6-axis IMU)                     [not yet integrated]
+            |
+            v
+   Window buffer: 128 samples x 6 channels
+            |
+            v
+   +---------------------------------------+
+   |  CNN-LSTM accelerator (FPGA fabric)   |
+   |  AXI4-Stream in  : 96 bit  x 128 beats|
+   |  AXI4-Stream out : 384 bit x 1 beat   |
+   +---------------------------------------+
+            |
+            v
+   argmax -> class -> alert action          [not yet implemented]
+\end{verbatim}
+
+\subsection{Network architecture}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llr r}
+\toprule
+\textbf{Layer} & \textbf{Configuration} & \textbf{Output shape} & \textbf{Params} \\
+\midrule
+Input           & 128 steps $\times$ 6 channels   & (128, 6)  & 0 \\
+Conv1D          & 16 filters, $k = 5$, no bias    & (124, 16) & 480 \\
+BatchNorm + ReLU& folded into the convolution     & (124, 16) & 64 \\
+Conv1D          & 16 filters, $k = 5$, no bias    & (120, 16) & 1{,}280 \\
+BatchNorm + ReLU& folded into the convolution     & (120, 16) & 64 \\
+MaxPooling1D    & pool 2                          & (60, 16)  & 0 \\
+Dropout         & $p = 0.3$, training only        & (60, 16)  & 0 \\
+LSTM            & 16 hidden, final state only     & (16,)     & 2{,}176 \\
+Dropout         & $p = 0.3$, training only        & (16,)     & 0 \\
+Dense + ReLU    & 16 units                        & (16,)     & 272 \\
+Dense           & 6 units, logits                 & (6,)      & 102 \\
+\midrule
+\multicolumn{3}{r}{\textbf{Total trainable parameters}} & \textbf{4{,}374} \\
+\bottomrule
+\end{tabular}
+\caption{Deployed network. Shapes are those reported by the synthesis tool
+after batch-normalisation folding and dropout removal.}
+\end{table}
+
+The output is six raw logits. The softmax normally applied in training is
+omitted in hardware, because it is monotonic and the decision is taken by
+\texttt{argmax}, which the normalisation does not affect.
+
+\subsection{Channel selection}
+
+The UCI~HAR dataset provides nine channels: body acceleration, body angular
+velocity and total acceleration, each in three axes. This design uses six ---
+total acceleration and body angular velocity --- because those are exactly what
+an MPU6050 outputs at its register interface. Body acceleration is total
+acceleration with the gravity component removed by a Butterworth filter applied
+offline by the dataset authors; using it would require reimplementing that
+filter in hardware ahead of the network. Discarding it removes that burden
+entirely at negligible accuracy cost.
+
+For the same reason no input normalisation is applied. The network is trained
+on raw physical units, so on-device preprocessing reduces to a constant scaling
+of the sensor's integer output --- a shift rather than a per-channel affine
+transform.
+
+\section{Quantization Strategy}
+\label{sec:quant}
+
+Neural networks are trained in 32-bit floating point, but floating-point
+arithmetic is expensive to synthesise. Deployment therefore requires mapping
+every weight, activation and intermediate result onto a fixed-point
+representation. This section states what that mapping is in this design, what
+the synthesis tool derives automatically, and what the alternatives would be.
+
+\textbf{The quantization used here is post-training and uniform.} The network is
+trained entirely in floating point and the trained weights are then mapped to a
+fixed-point format specified in the \texttt{hls4ml} configuration. No
+quantization-aware training was performed. The consequences of that choice, and
+the techniques that would improve on it, are discussed in
+Section~\ref{sec:qat}.
+
+\subsection{Uniform fixed-point representation}
+
+A value in the format \texttt{ap\_fixed<W,I>} is a $W$-bit two's-complement
+integer interpreted with $I$ bits before the binary point, leaving
+$f = W - I$ fractional bits. The representable set is the uniform grid
+
+\begin{equation}
+\mathcal{Q}_{W,I} = \left\{ k \cdot \Delta \;\middle|\;
+  k \in \mathbb{Z},\;
+  -2^{W-1} \le k \le 2^{W-1}-1 \right\},
+  \qquad \Delta = 2^{-f},
+\end{equation}
+
+so the quantization step and the dynamic range are set independently by $f$ and
+$I$ respectively:
+
+\begin{equation}
+\Delta = 2^{I-W},
+\qquad
+x \in \left[\, -2^{\,I-1},\; 2^{\,I-1} - \Delta \,\right].
+\end{equation}
+
+This design uses \texttt{ap\_fixed<16,6>} throughout, giving
+
+\begin{equation}
+\Delta = 2^{-10} \approx 9.77 \times 10^{-4},
+\qquad
+x \in [-32,\; 32 - 2^{-10}].
+\end{equation}
+
+The format was chosen from the physical units of the input rather than by
+search. Accelerometer readings are expressed in $g$ and angular velocity in
+rad/s, both of which lie well inside $\pm 32$ for human motion, so six integer
+bits provide ample headroom while ten fractional bits resolve the signal far
+below sensor noise.
+
+The error introduced by quantization behaves as additive noise of variance
+$\Delta^2/12$ for a uniformly distributed residual, giving the standard result
+that the signal-to-quantization-noise ratio improves by approximately
+
+\begin{equation}
+\Delta \mathrm{SQNR} \approx 20 \log_{10} 2 \approx 6.02\ \mathrm{dB}
+\end{equation}
+
+per additional fractional bit. Moving from \texttt{ap\_fixed<16,6>} to
+\texttt{ap\_fixed<8,4>} removes six fractional bits and therefore costs roughly
+36\,dB of arithmetic fidelity --- which is why the resource saving reported in
+Section~\ref{sec:results} cannot be accepted without measuring its accuracy
+cost.
+
+\subsection{Rounding and overflow behaviour}
+
+A fixed-point type is incompletely specified by $W$ and $I$ alone: the
+behaviour on values falling between grid points, and on values exceeding the
+range, must also be fixed. Inspection of the generated project shows the
+default modes are in use throughout, the full type being
+\texttt{ap\_fixed<16,6,AP\_TRN,AP\_WRAP,0>}.
+
+\textbf{Truncation (\texttt{AP\_TRN}).} The value is rounded toward $-\infty$:
+
+\begin{equation}
+Q(x) = \Delta \left\lfloor \frac{x}{\Delta} \right\rfloor,
+\qquad
+e = Q(x) - x \in (-\Delta,\, 0].
+\end{equation}
+
+The error is therefore strictly non-positive, with mean $-\Delta/2$, rather
+than the zero-mean error of round-to-nearest (\texttt{AP\_RND}), for which
+$e \in (-\Delta/2, \Delta/2]$. This distinction is not cosmetic. Over a dot
+product of $N$ terms the truncation bias accumulates \emph{linearly},
+
+\begin{equation}
+\mathbb{E}\!\left[\sum_{i=1}^{N} e_i\right] = -\frac{N\Delta}{2},
+\end{equation}
+
+whereas a zero-mean rounding error accumulates only as $\mathcal{O}(\sqrt{N})$
+in standard deviation. Wider layers are thus systematically biased downward
+under truncation. For the 80-term dot products of the second convolutional
+layer this is a deterministic offset of $40\Delta \approx 0.039$ before the
+nonlinearity.
+
+\textbf{Wrapping (\texttt{AP\_WRAP}).} On overflow the value is reduced modulo
+$2^{I}$, so a result marginally above the maximum representable value becomes
+the most negative value. Unlike saturation (\texttt{AP\_SAT}), which clamps,
+wrapping converts a small numerical excursion into a maximal sign error.
+Saturation costs a comparator per value and was not enabled; the design instead
+relies on the six integer bits being generous relative to the physical signal
+range.
+
+Both defaults are reasonable here given that headroom, but they are defaults
+rather than decisions, and they are the first things to revisit should
+fixed-point accuracy prove disappointing.
+
+\subsection{Automatic accumulator widening}
+\label{sec:accum}
+
+Quantizing weights and activations to $W$ bits does not mean the arithmetic is
+performed at $W$ bits. A product of \texttt{ap\_fixed<$W_x$,$I_x$>} and
+\texttt{ap\_fixed<$W_w$,$I_w$>} operands requires $W_x + W_w$ bits to be exact,
+and summing $N$ such products requires a further $\lceil \log_2 N \rceil$
+integer bits to be guaranteed overflow-free. \texttt{hls4ml} sizes these
+accumulators automatically, and inspection of the generated type definitions
+shows it applies
+
+\begin{align}
+W_{\mathrm{acc}} &= W_x + W_w + \lceil \log_2 N \rceil + 1, \\
+I_{\mathrm{acc}} &= I_x + I_w + \lceil \log_2 N \rceil + 1,
+\end{align}
+
+where the additional bit is a guard bit. The rule was checked against every
+layer of the generated design, with $N = k \cdot C_{\mathrm{in}}$ for the
+convolutions and $N = n_{\mathrm{in}}$ for the dense layers:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrll}
+\toprule
+\textbf{Layer} & \textbf{$N$} & \textbf{$\lceil \log_2 N \rceil$} &
+\textbf{Predicted} & \textbf{Generated} \\
+\midrule
+\texttt{conv1d}    & 30 & 5 & \texttt{ap\_fixed<38,18>} & \texttt{ap\_fixed<38,18>} \\
+\texttt{conv1d\_1} & 80 & 7 & \texttt{ap\_fixed<40,20>} & \texttt{ap\_fixed<40,20>} \\
+\texttt{dense}     & 16 & 4 & \texttt{ap\_fixed<37,17>} & \texttt{ap\_fixed<37,17>} \\
+\texttt{logits}    & 16 & 4 & \texttt{ap\_fixed<37,17>} & \texttt{ap\_fixed<37,17>} \\
+\bottomrule
+\end{tabular}
+\caption{Predicted versus generated accumulator types, for
+\texttt{ap\_fixed<16,6>} inputs and weights throughout. The rule reproduces all
+four exactly.}
+\end{table}
+
+Two practical consequences follow. First, the accumulators are safe by
+construction, so overflow cannot occur \emph{inside} a dot product. Second, the
+risk is instead concentrated at the layer boundaries, where the wide
+accumulator is cast back down to \texttt{ap\_fixed<16,6>} under the wrapping
+mode described above. The network output is a visible instance of this: the
+logits emerge as \texttt{ap\_fixed<37,17>} rather than the \texttt{<16,6>} used
+internally, because the final accumulator is never narrowed. This is harmless
+for classification, since \texttt{argmax} is invariant to the representation,
+but a host reading those values must interpret them with 17 integer bits.
+
+\subsection{Quantization-aware alternatives}
+\label{sec:qat}
+
+Post-training quantization maps a network that was never aware it would be
+quantized. Quantization-aware training (QAT) instead simulates the quantizer
+during the forward pass, allowing the weights to adapt to it. \textbf{Neither
+technique below was used in this project.} Both are the natural next step, and
+are described here because they bear directly on the unmeasured accuracy risk
+identified in Section~\ref{sec:limitations}.
+
+\textbf{The straight-through estimator.} The obstacle common to all QAT is that
+the quantizer is piecewise constant, so $\partial Q / \partial x = 0$ almost
+everywhere and no gradient reaches the weights. The standard remedy is the
+straight-through estimator, which applies the quantizer in the forward pass but
+substitutes the identity in the backward pass:
+
+\begin{equation}
+\text{forward: } \hat{x} = Q(x),
+\qquad
+\text{backward: } \frac{\partial L}{\partial x}
+  \;\approx\; \frac{\partial L}{\partial \hat{x}}
+  \cdot \mathbf{1}\!\left[\,|x| \le x_{\max}\,\right].
+\end{equation}
+
+The indicator suppresses gradients for saturated values, which would otherwise
+be pushed further out of range.
+
+\textbf{QKeras} applies this at tensor granularity. Each layer is given a
+quantizer such as \texttt{quantized\_bits($b$, $i$, $\alpha$)}, fixing one
+bitwidth for an entire weight tensor, and the network is fine-tuned from the
+floating-point checkpoint. The bitwidths remain hyperparameters chosen by the
+designer.
+
+\textbf{High Granularity Quantization (HGQ)}~\cite{hgq} removes that manual
+choice. Rather than one bitwidth per tensor, HGQ assigns a bitwidth $b_i$ to
+each individual parameter and learns it jointly with the weights by gradient
+descent. For this to be meaningful the hardware cost must enter the objective,
+so the training loss is augmented with a differentiable resource proxy. The
+natural proxy is the bit-operation count: a multiplication of a $b_w$-bit
+weight by a $b_a$-bit activation costs approximately $b_w \cdot b_a$
+bit-operations, so for a network with multiplication set $\mathcal{M}$,
+
+\begin{equation}
+\mathrm{EBOPs}(\mathbf{b}) \;\approx\;
+  \sum_{(w,a) \in \mathcal{M}} b_w \cdot b_a ,
+\qquad
+\mathcal{L} = \mathcal{L}_{\mathrm{task}}
+  + \beta \cdot \mathrm{EBOPs}(\mathbf{b}).
+\end{equation}
+
+The bitwidths are held continuous during optimisation and discretised for
+export, with the straight-through estimator supplying gradients through the
+quantizer. The coefficient $\beta$ traces a Pareto frontier between accuracy
+and hardware cost, so instead of selecting a single uniform format the designer
+selects an operating point on a measured curve.
+
+This is precisely the choice that was made by hand in this project, and made
+crudely: \texttt{ap\_fixed<16,6>} was applied uniformly to every layer, even
+though the layers differ substantially in dynamic range, and the 8-bit
+alternative was evaluated only as a second uniform format. HGQ would allow the
+first convolution, which sees bounded physical units, to use far fewer bits
+than the LSTM gates, which do not. Neither library is installed in the current
+environment, so adopting either requires toolchain setup in addition to
+retraining.
+
+\section{Design and Implementation}
+
+\subsection{Toolflow}
+
+\begin{verbatim}
+  Keras / TensorFlow  --->  hls4ml  --->  Vitis HLS  --->  Vivado  ---> FPGA
+   train, 90.91%          C++ + tcl        RTL,          IP, block    bitstream
+                                           csynth        design
+\end{verbatim}
+
+Training uses TensorFlow~2.21 with Adam at a learning rate of $10^{-3}$, batch
+size 64, for 40~epochs, with sparse categorical cross-entropy computed from
+logits. The dataset split is the one published with UCI~HAR: 7{,}352 training
+and 2{,}947 test windows, partitioned by subject so that no participant appears
+in both.
+
+\subsection{Framework constraint: PyTorch could not be used}
+
+The network was first implemented in PyTorch. It could not be converted. The
+\texttt{hls4ml} PyTorch front end (version~1.3.0) provides no handler for the
+\texttt{transpose} operation, and a PyTorch CNN--LSTM requires two of them:
+\texttt{nn.Conv1d} expects channel-first tensors while \texttt{nn.LSTM} expects
+(batch, time, feature) ordering. Three alternative tensor layouts were
+attempted; all failed with \texttt{Unsupported function transpose}.
+
+Keras \texttt{Conv1D} is channels-last by construction, so the identical
+architecture converts with no transpose operations at all. The recurrent layer
+itself is not the obstacle --- the PyTorch LSTM handler is present and
+functional --- which makes this purely an artefact of tensor-layout convention.
+The implementation was therefore moved to Keras.
+
+\subsection{Streaming versus parallel interfaces}
+\label{sec:iostream}
+
+\texttt{hls4ml} offers two interface models. Under \texttt{io\_parallel} a layer
+receives its entire input tensor at once and is unrolled across all output
+positions. Under \texttt{io\_stream} the layer receives one time step at a time
+through a FIFO and maintains a line buffer, so the hardware instantiated scales
+with filter count rather than with window length.
+
+For a convolutional layer producing 124 output positions this distinction is
+decisive, and it is not something the reuse factor can compensate for: reuse
+shares multipliers \emph{within} a dot product but does not prevent unrolling
+\emph{across} output positions. The measured effect is reported in
+Section~\ref{sec:results}.
+
+\subsection{Activation layer construction}
+
+Keras offers two syntactically equivalent ways to apply a rectified linear unit:
+the \texttt{ReLU} layer class and \texttt{Activation('relu')}. They compute
+identical functions, since the \texttt{ReLU} layer's threshold defaults to zero.
+They do not synthesise identically. \texttt{hls4ml} maps the layer class to a
+\emph{parameterised} thresholded-ReLU primitive that carries a runtime threshold
+comparison for every element, while \texttt{Activation('relu')} maps to a plain
+ReLU. Across the 3{,}904 activations of the convolutional front end the
+difference is substantial, and is quantified in Table~\ref{tab:relu}.
+
+\subsection{Generated IP interface}
+
+Vitis~HLS exports the design as an IP-XACT package for Vivado. The top-level
+interface is:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Port} & \textbf{Width} & \textbf{Description} \\
+\midrule
+\texttt{imu\_window}  & 96 bit  & AXI4-Stream slave; 6 channels $\times$
+                                  \texttt{ap\_fixed<16,6>}, 128 beats \\
+\texttt{layer14\_out} & 384 bit & AXI4-Stream master; 6 logits, 1 beat \\
+\texttt{ap\_clk}, \texttt{ap\_rst\_n} & 1 bit & clock and active-low reset \\
+\texttt{ap\_start}, \texttt{ap\_done} & 1 bit & block-level handshake \\
+\texttt{ap\_ready}, \texttt{ap\_idle} & 1 bit & block-level handshake \\
+\bottomrule
+\end{tabular}
+\caption{Top-level ports of the exported IP core.}
+\end{table}
+
+Three properties of this interface constrain system integration. Control is a
+block-level handshake rather than an AXI4-Lite register map, so a processor
+cannot start the core by writing a register; for a streaming kernel
+\texttt{ap\_start} is instead tied asserted. The streams carry no
+\texttt{TLAST} side-channel, which a DMA engine normally uses to delimit
+packets. Finally, 96 and 384 bits are not among the stream widths an AXI~DMA
+supports; both are integer multiples of 32~bits, so width converters are
+required.
+
+\section{Results}
+\label{sec:results}
+
+All figures in this section are Vitis~HLS~2023.2 post-synthesis estimates for
+\texttt{xczu7ev-ffvc1156-2-e} unless stated otherwise. Estimates of this kind
+are generally pessimistic for LUT count; place-and-route figures are expected to
+be lower.
+
+\subsection{Classification accuracy}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Configuration} & \textbf{Parameters} & \textbf{Test accuracy} \\
+\midrule
+16 filters / 16 hidden / 16 dense & 4{,}374  & 90.91\% \\
+64 filters / 64 hidden / 64 dense & 60{,}486 & 92.09\% \\
+\bottomrule
+\end{tabular}
+\caption{Accuracy against network width on the UCI~HAR test split.}
+\end{table}
+
+A 13.8-fold increase in parameters yields 1.18~percentage points of accuracy.
+The smaller network is retained for the reason given in
+Section~\ref{sec:width}.
+
+\subsection{Interface model}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Block} & \textbf{\texttt{io\_parallel} LUT} & \textbf{\texttt{io\_stream} LUT} \\
+\midrule
+Conv1D \#1     & 21{,}729  & 2{,}911 \\
+Activation \#1 & 113{,}099 & 1{,}075 \\
+Conv1D \#2     & 53{,}751  & 4{,}993 \\
+Activation \#2 & 109{,}451 & 1{,}107 \\
+MaxPooling     & 35        & 1{,}141 \\
+\midrule
+\textbf{Complete design} & $\approx$\textbf{298{,}000} & \textbf{35{,}745} \\
+\bottomrule
+\end{tabular}
+\caption{Effect of interface model. The \texttt{io\_parallel} column is the
+convolutional front end only; the recurrent and dense layers had not been
+reported when that synthesis was halted.}
+\label{tab:relu}
+\end{table}
+
+Two effects are superimposed in this table. The streaming interface removes the
+unrolling across output positions. Separately, the activation figures of
+113{,}099 and 109{,}451~LUT are an artefact of the thresholded-ReLU construct
+described above; replacing it with \texttt{Activation('relu')} reduced those two
+blocks to 1{,}075 and 1{,}107~LUT --- a combined reduction from 222{,}550 to
+2{,}182~LUT, by a factor of 102, with no change whatsoever to the computed
+function or to the 90.91\% accuracy.
+
+\subsection{Target device comparison}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrl}
+\toprule
+\textbf{Device} & \textbf{LUT} & \textbf{DSP} & \textbf{BRAM} & \textbf{Outcome} \\
+\midrule
+XCZU7EV (ZCU104)   & 16\%  & 3\%   & 25\%  & Fits \\
+XC7Z020 (Zynq-7020)& 67\%  & 24\%  & 56\%  & Would fit \\
+GW1NR-9 (Tang Nano 9K) & 414\% & 270\% & 612\% & Does not fit \\
+\bottomrule
+\end{tabular}
+\caption{Utilisation of the same 35{,}745~LUT design across three candidate
+devices.}
+\end{table}
+
+\subsection{Final design on the target device}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Resource} & \textbf{Used} & \textbf{Utilisation} \\
+\midrule
+LUT              & 33{,}500 & 14\% \\
+Flip-flops       & 21{,}724 & 4\%  \\
+DSP slices       & 54       & 3\%  \\
+Block RAM (18\,Kb) & 159    & 25\% \\
+UltraRAM         & 0        & 0\%  \\
+\midrule
+Clock            & \multicolumn{2}{l}{100\,MHz, timing met (0.37\,ns slack)} \\
+Latency          & \multicolumn{2}{l}{160{,}339 cycles = 1.60\,ms} \\
+Throughput margin& \multicolumn{2}{l}{2.56\,s window / 1.60\,ms = 1600$\times$} \\
+\bottomrule
+\end{tabular}
+\caption{Final configuration: \texttt{io\_stream}, maximum reuse,
+\texttt{ap\_fixed<16,6>}, on XCZU7EV at 100\,MHz.}
+\end{table}
+
+\subsection{Arithmetic precision}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Precision} & \textbf{LUT} & \textbf{DSP} & \textbf{BRAM} \\
+\midrule
+\texttt{ap\_fixed<16,6>} & 35{,}745 & 54 & 159 \\
+\texttt{ap\_fixed<8,4>}  & 26{,}526 & 16 & 109 \\
+\bottomrule
+\end{tabular}
+\caption{Effect of halving the word length (50\,MHz runs).}
+\end{table}
+
+Halving the word length reduces LUT usage by 26\%, block RAM by 31\% and DSP
+usage by 70\%. The accuracy cost of this reduction has not been measured, and
+16-bit precision was retained because the target device has ample margin.
+
+\subsection{Activation lookup tables}
+\label{sec:tables}
+
+The LSTM's sigmoid and tanh evaluations are realised as lookup tables, and
+these dominate the recurrent layer's memory footprint. Two experiments isolate
+what drives their size.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Table} & \textbf{$H = 16$} & \textbf{$H = 64$} \\
+\midrule
+sigmoid & 24 BRAM & 96 BRAM \\
+tanh    & 8 BRAM  & 32 BRAM \\
+\midrule
+Total   & 32 BRAM & 128 BRAM \\
+\bottomrule
+\end{tabular}
+\caption{Activation-table memory against LSTM hidden size.}
+\end{table}
+
+Reducing the configured table depth from 1024 to 256 entries changed nothing:
+the generated constant was verified to be 256 in the synthesised project, and
+the reported resources were byte-identical. Table footprint therefore does not
+scale with depth. It scales with hidden size, exactly linearly --- a factor of
+four in $H$ producing a factor of four in memory --- which is consistent with
+the table being replicated to permit parallel access across the $4H$ gate
+evaluations each time step requires.
+
+\subsection{Network width and the memory ceiling}
+\label{sec:width}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Configuration} & \textbf{LUT} & \textbf{DSP} & \textbf{BRAM} & \textbf{Latency} \\
+\midrule
+16/16/16 & 33{,}500 (14\%)  & 54 (3\%)   & 159 (25\%)            & 1.60\,ms \\
+64/64/64 & 126{,}167 (54\%) & 198 (11\%) & \textbf{654 (104\%)}  & 25.4\,ms \\
+\bottomrule
+\end{tabular}
+\caption{The wider network exceeds the device's block~RAM.}
+\end{table}
+
+The wider network is comfortable in logic and arithmetic but exceeds available
+block~RAM by 4\%. Since the device's 96~UltraRAM blocks (27\,Mb) remain entirely
+unused, this is a mapping problem rather than a capacity one, and directing the
+weight arrays to UltraRAM is the obvious remedy. That work was not completed, so
+the narrower network remains the only configuration measured to fit, and the
+1.18-point accuracy difference stands as its cost.
+
+\subsection{Negative result: infeasibility on a small FPGA}
+
+The project initially targeted a Sipeed Tang~Nano~9K (Gowin GW1NR-9: 8{,}640
+LUT4, 20~DSP, 26 block~RAMs). The design does not fit, and the reason is
+structural rather than a question of tuning.
+
+The LSTM accounts for 56\% of all logic in the design. Within it, the sigmoid
+and tanh tables alone require 32~block~RAMs --- more than the 26 the entire
+device contains --- before a single weight or stream buffer is allocated. Since
+gated recurrence requires both nonlinearities by definition, no reduction in
+precision, table depth or weight count removes this floor. Measurements
+confirmed this: 8-bit precision brought DSP usage within budget (16 of 20) but
+left LUT usage 3.1$\times$ and block~RAM 4.2$\times$ over.
+
+The practical conclusion is that an LSTM is the wrong primitive for a
+sub-10k-LUT device. A purely convolutional network with global pooling has no
+such tables; the measured convolutional front end occupies 7{,}904~LUT and would
+fit that device with room remaining for peripheral logic.
+
+\section{Applications and Advantages}
+
+\begin{itemize}
+  \item Real-time activity classification with a 1600$\times$ latency margin,
+        leaving substantial headroom for additional processing stages.
+  \item Inference performed locally, so raw inertial data need never leave the
+        device --- relevant where the sensor stream is privacy-sensitive.
+  \item A reproducible toolflow in which retraining the network and
+        regenerating hardware requires no manual RTL modification.
+  \item Deterministic latency, as the design contains no cache, operating
+        system or contended shared resource.
+  \item A characterised design space, allowing the accuracy/area trade-off to be
+        re-evaluated quickly if the target device changes.
+\end{itemize}
+
+\section{Limitations and Future Scope}
+\label{sec:limitations}
+
+\subsection{Limitations}
+
+\begin{itemize}
+  \item \textbf{No hardware deployment.} All results are high-level-synthesis
+        estimates. No bitstream has been generated and the design has not been
+        executed on a physical device. Place-and-route figures will differ.
+  \item \textbf{Fixed-point accuracy unverified.} The 90.91\% figure is the
+        floating-point model's. The accuracy of the 16-bit fixed-point
+        implementation has not been measured. Since the quantization is
+        post-training and uniform, with no quantization-aware fine-tuning,
+        there is no guarantee the mapping is benign.
+  \item \textbf{The sensor is not integrated.} The MPU6050 interface, window
+        assembly and alert logic are specified but unimplemented.
+  \item \textbf{The task is activity recognition, not safety detection.}
+        UCI~HAR contains six ordinary activities and no fall, impact or
+        distress class. The trained network cannot detect events it has never
+        observed, and no claim of fall or assault detection is supported by
+        these results.
+  \item \textbf{Window-level, not event-level.} Classification is performed on
+        2.56\,s windows in isolation, with no temporal smoothing or
+        hysteresis across consecutive windows.
+\end{itemize}
+
+\subsection{Future scope}
+
+\begin{itemize}
+  \item Generate the bitstream and validate on hardware, comparing
+        place-and-route utilisation against the estimates reported here.
+  \item Measure fixed-point accuracy using bit-accurate C simulation, and
+        re-evaluate 8-bit precision against the measured loss.
+  \item Replace uniform post-training quantization with quantization-aware
+        training. High Granularity Quantization (Section~\ref{sec:qat}) is the
+        strongest candidate, since it learns a per-parameter bitwidth against a
+        differentiable resource cost rather than requiring one format to be
+        chosen by hand for the whole network.
+  \item Map weight arrays to UltraRAM to accommodate the wider network and
+        recover the 1.18-point accuracy difference.
+  \item Retrain on a fall-annotated dataset (for instance EdgeFall) to support
+        the safety application the architecture was originally intended for.
+  \item Integrate the MPU6050 and implement continuous windowed inference with
+        temporal smoothing.
+  \item Measure power consumption, which is the metric that would justify an
+        FPGA over a microcontroller for a battery-powered device, and which
+        this work does not address.
+\end{itemize}
+
+\section{Conclusion}
+
+A 1D~CNN--LSTM activity classifier was trained to 90.91\% accuracy on UCI~HAR
+using 4{,}374 parameters, converted to synthesisable hardware through
+\texttt{hls4ml} and Vitis~HLS, and packaged as an AXI4-Stream IP core. On the
+XCZU7EV the design occupies 14\% of available logic and completes inference in
+1.60\,ms against a 2.56\,s window.
+
+The more transferable finding concerns how little of the hardware cost was
+determined by the network itself. Two configuration choices --- the activation
+layer construct and the interface model --- together accounted for roughly an
+order of magnitude in area, while leaving the computed function unchanged. The
+corresponding negative result is equally concrete: the sigmoid and tanh tables
+an LSTM requires exceed the entire block~RAM capacity of a small FPGA
+independently of precision or table depth, which rules out gated recurrence on
+such devices rather than merely making it difficult.
+
+The flow from trained network to packaged IP is complete and reproducible. What
+remains is the hardware half: bitstream generation, on-board validation, sensor
+integration, and retraining on data containing the events a safety device would
+need to recognise.
+
+\section{References}
+
+\begin{thebibliography}{99}
+
+\bibitem{anguita2013}
+Anguita, D., Ghio, A., Oneto, L., Parra, X., \& Reyes-Ortiz, J.~L. (2013).
+\textit{A Public Domain Dataset for Human Activity Recognition Using
+Smartphones}. 21st European Symposium on Artificial Neural Networks (ESANN).
+
+\bibitem{ordonez2016}
+Ordóñez, F.~J., \& Roggen, D. (2016). \textit{Deep Convolutional and LSTM
+Recurrent Neural Networks for Multimodal Wearable Activity Recognition}.
+Sensors, 16(1), 115.
+
+\bibitem{hammerla2016}
+Hammerla, N.~Y., Halloran, S., \& Plötz, T. (2016). \textit{Deep,
+Convolutional, and Recurrent Models for Human Activity Recognition using
+Wearables}. Proceedings of IJCAI 2016.
+
+\bibitem{duarte2018}
+Duarte, J., et al. (2018). \textit{Fast inference of deep neural networks in
+FPGAs for particle physics}. Journal of Instrumentation, 13, P07027.
+
+\bibitem{umuroglu2017}
+Umuroglu, Y., Fraser, N.~J., Gambardella, G., Blott, M., Leong, P., Jahre, M.,
+\& Vissers, K. (2017). \textit{FINN: A Framework for Fast, Scalable Binarized
+Neural Network Inference}. Proceedings of FPGA 2017.
+
+\bibitem{hochreiter1997}
+Hochreiter, S., \& Schmidhuber, J. (1997). \textit{Long Short-Term Memory}.
+Neural Computation, 9(8), 1735--1780.
+
+\bibitem{ioffe2015}
+Ioffe, S., \& Szegedy, C. (2015). \textit{Batch Normalization: Accelerating
+Deep Network Training by Reducing Internal Covariate Shift}. Proceedings of
+ICML 2015.
+
+\bibitem{lecun2022}
+LeCun, Y. (2022). \textit{A Path Towards Autonomous Machine Intelligence}.
+OpenReview.
+
+\bibitem{assran2023}
+Assran, M., et al. (2023). \textit{Self-Supervised Learning from Images with a
+Joint-Embedding Predictive Architecture}. Proceedings of CVPR 2023.
+
+\bibitem{hgq}
+Sun, C., \AA{}rrestad, T.~K., Loncar, V., Ngadiuba, J., \& Spiropulu, M.
+(2024). \textit{Gradient-based Automatic Mixed Precision Quantization for
+Neural Networks On-Chip}. (High Granularity Quantization, HGQ.)
+% TODO verify: venue, year and author list before submission.
+
+\bibitem{vitishls}
+AMD/Xilinx. \textit{Vitis High-Level Synthesis User Guide} (UG1399),
+version 2023.2.
+
+\bibitem{zcu104}
+AMD/Xilinx. \textit{ZCU104 Evaluation Board User Guide} (UG1267).
+
+\end{thebibliography}
+
+\newpage
+\appendix
+
+\section{Development Environment}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Component} & \textbf{Version} & \textbf{Role} \\
+\midrule
+Python            & 3.11.9      & host environment \\
+TensorFlow / Keras& 2.21 / 3.14 & network training \\
+\texttt{hls4ml}   & 1.3.0       & network $\rightarrow$ HLS C++ \\
+Vitis HLS         & 2023.2      & C++ $\rightarrow$ RTL, IP packaging \\
+Vivado            & 2023.2      & block design, implementation \\
+Target device     & \multicolumn{2}{l}{XCZU7EV-2FFVC1156E (ZCU104)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Target Device Resources}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Resource} & \textbf{XCZU7EV} & \textbf{GW1NR-9} \\
+\midrule
+LUT             & 230{,}400 & 8{,}640 \\
+Flip-flops      & 460{,}800 & --- \\
+DSP slices      & 1{,}728   & 20 \\
+Block RAM       & 11.0\,Mb  & 468\,Kb \\
+UltraRAM        & 27.0\,Mb  & --- \\
+Processor       & \multicolumn{1}{c}{4$\times$Cortex-A53} & none \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Reproduction}
+
+\begin{lstlisting}[language=bash]
+# Build the dataset cache and train the network
+python -m jepasafe.demopart --epochs 30
+python -m jepasafe.cnnlstm_keras --epochs 40
+
+# Convert to an HLS project
+python -m jepasafe.export_hls
+
+# C synthesis
+export PATH="/c/Xilinx/Vitis_HLS/2023.2/bin:$PATH"
+cd hls/jepasafe && vitis_hls -f build_prj.tcl
+# report: jepasafe_prj/solution1/syn/report/csynth.rpt
+
+# Package as a Vivado IP
+cd hls/jepasafe && vitis_hls -f ../../scripts/export_ip.tcl
+# output: jepasafe_prj/solution1/impl/ip/nitt_hls_jepasafe_1_0.zip
+\end{lstlisting}
+
+\section{Dataset Summary}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Source           & UCI HAR (Anguita et al., 2013) \\
+Participants     & 30, split by subject between train and test \\
+Sampling rate    & 50\,Hz \\
+Window           & 128 samples (2.56\,s) \\
+Training windows & 7{,}352 \\
+Test windows     & 2{,}947 \\
+Channels used    & 6 of 9 (total acceleration, body angular velocity) \\
+Classes          & walking, upstairs, downstairs, sitting, standing, laying \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

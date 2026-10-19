@@ -13,13 +13,16 @@ redistributable only from their original sources.
 
 ## `processed/`
 
-Training reads `X.npy` and `y.npy` from here:
+`uci_har/` holds the parsed cache, written on first run of
+`python -m jepasafe.demopart`:
 
-- `X.npy` — float32, shape `(n_windows, window_size, 6)`, channel order `[ax, ay, az, gx, gy, gz]`
-- `y.npy` — uint8, shape `(n_windows,)`, `1` = anomaly (fall / violent motion)
+- `X_{train,test}.npy` — float32 `(n_windows, 128, 9)`, channels
+  `[body_acc_xyz, body_gyro_xyz, total_acc_xyz]`
+- `y_{train,test}.npy` — int64 `(n_windows,)`, 0-5, see `demopart.CLASS_NAMES`
 
-Also save the normalisation constants (`mean.npy`, `std.npy`) — the same values
-have to be baked into the FPGA preprocessing path, or inference on-device will
-see a different input distribution than training did.
+`cnnlstm_keras.py` narrows that to 6 channels (`total_acc` + `body_gyro`) —
+exactly what an MPU6050 outputs. `body_acc` is `total_acc` with gravity filtered
+out, which would mean reimplementing UCI HAR's Butterworth filter in RTL.
 
-Windowing and normalisation helpers are in `src/jepasafe/data.py`.
+No normalisation constants: the model trains on raw physical units (g, rad/s),
+so on-device preprocessing is a shift rather than a per-channel affine.

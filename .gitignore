@@ -24,6 +24,10 @@ models/**/*.npy
 models/**/*.pb
 !models/**/.gitkeep
 !models/README.md
+# ...except the two trained checkpoints. They are ~400 KB each and without them
+# nobody can regenerate the exact HLS project behind the published accuracy.
+!models/checkpoints/cnnlstm_keras.keras
+!models/checkpoints/cnnlstm_keras_64.keras
 
 # hls4ml generated projects
 hls/*
@@ -47,3 +51,15 @@ project_process_config.json
 .DS_Store
 Thumbs.db
 *.swp
+
+# Vivado IP repository — copied out of the gitignored hls/ tree so a Vivado
+# project can point at a stable path. Regenerate with scripts/export_ip.tcl.
+ip_repo/
+
+# LaTeX build artefacts
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.fls
+report/*.fdb_latexmk
