@@ -5,6 +5,73 @@ part that matters for the report, so write them down while they're fresh.
 
 ---
 
+## 2026-10-19 (later) — Bitstream built, and the HLS estimate audited
+
+**`vivado/top_impl/jepasafe_top.bit` exists.** Full standalone-PL design,
+synthesised, placed, routed and written for `xczu7ev-ffvc1156-2-e` against the
+installed ZCU104 board file. Timing met, DRC clean, 0 critical warnings. The
+only step a board would add is downloading it.
+
+| | Core alone (OOC) | Full top | % of ZU7EV |
+|---|---|---|---|
+| CLB LUTs | 14,513 | **15,173** | 6.6% |
+| CLB Registers | 19,260 | **19,565** | 4.3% |
+| DSPs | 54 | **57** | 3.3% |
+| Block RAM tiles | 48 | **48** (= 96 BRAM_18K) | 15.4% |
+| URAM | 0 | **0** | 0% |
+| Bonded IOB | — | 9 | 2.5% |
+| MMCM | — | 1 | 12.5% |
+| WNS | +2.984 ns | **+2.887 ns** | met |
+| WHS | +0.023 ns | **+0.010 ns** | met, tight |
+
+The whole preprocessing chain — I2C master, scaling, 128x96 window buffer,
+argmax, MMCM and I/O — costs only **660 LUTs and 3 DSPs** on top of the core.
+Critical path 7.11 ns, so the design would close around 140 MHz if the latency
+ever mattered. It does not: 1.6 ms against a 2.56 s window.
+
+**How the Vitis HLS estimate held up:**
+
+| | csynth estimate | Vivado post-route | Verdict |
+|---|---|---|---|
+| LUT | 33,500 | 15,173 | over-estimated 2.2x |
+| FF | 21,724 | 19,565 | close |
+| DSP | 54 | 54 (core) | **exact** |
+| BRAM_18K | 159 | 96 | over-estimated 1.7x |
+
+Worth putting in the report: hls4ml/Vitis HLS estimates are *conservative on
+logic and memory but exact on DSP*. Every "will it fit" decision earlier in this
+project was made against LUT and BRAM numbers that turned out to be roughly
+twice the truth — including the Tang Nano rejection, which was correct anyway by
+a factor of four, and the 64/64/64 rejection at 654 BRAM_18K, which may deserve
+a re-measure now that the estimate is known to run ~1.7x high.
+
+**Correction, recorded because it nearly went into the report.** A first pass
+counted primitives with `get_cells -hier -filter {REF_NAME =~ DSP*}` and
+reported **486 DSPs**, a seeming 9x blowout against the estimate. That was a
+measurement error: on UltraScale+ a `DSP48E2` is modelled as nine leaf cells
+(`DSP_ALU`, `DSP_MULTIPLIER`, `DSP_PREADD_DATA`, ...), and 54 x 9 = 486 exactly.
+Raw `LUT*` counting is wrong the same way, since it ignores LUT6_2 pairing
+(20,608 counted vs 15,173 actual). `report_utilization` is the only authority;
+both Vivado scripts now parse it instead of counting cells.
+
+**Three ZCU104 facts, read from the board file rather than assumed.** All three
+contradict something written down earlier:
+
+| Assumed | Actual |
+|---|---|
+| 125 MHz single-ended user clock | **300 MHz differential pair** (AH18/AH17, DIFF_SSTL12) — the top divides it with an MMCM |
+| `led[5:0]`, six LEDs | **four** (D5 D6 A5 B5, LVCMOS33) |
+| PMOD voltage needs checking | **PL I2C is LVCMOS33** (N12/P12) — an MPU6050 attaches with no level shifting, so Gap 4 resolves favourably |
+
+The ZCU104 board file is also *installed* (`xilinx.com:zcu104:part0:1.1`),
+contradicting `vitis_src/README.txt`. And the Vivado licence covers XCZU7EV —
+`synth_design` ran to completion, which settles that open question.
+
+One caveat to carry forward: the PL UART is **LVCMOS18**, so an HC-08 at 3.3 V
+on that path *would* need level shifting.
+
+---
+
 ## Measurements
 
 CLAUDE.md asks for float-vs-fixed accuracy and the resource numbers every time

@@ -395,6 +395,40 @@ decides the tooling.
 
 ---
 
+## Stage 6 — Vivado implementation: "it would have fit" ✅ DONE
+
+**Done, including the bitstream.** `vivado/top_impl/jepasafe_top.bit`, for
+`xczu7ev-ffvc1156-2-e` against the installed ZCU104 board file. Timing met,
+DRC clean, 0 critical warnings.
+
+| | Core alone | Full top | % of ZU7EV |
+|---|---|---|---|
+| CLB LUTs | 14,513 | **15,173** | 6.6% |
+| CLB Registers | 19,260 | 19,565 | 4.3% |
+| DSPs | 54 | 57 | 3.3% |
+| BRAM_18K | 96 | 96 | 15.4% |
+| WNS / WHS | +2.984 / +0.023 ns | **+2.887 / +0.010 ns** | met |
+
+Answers to the questions this section raised below:
+
+- **Licence**: Vivado covers XCZU7EV. `synth_design` ran to completion.
+- **Clock**: the ZCU104 user clock is a **300 MHz differential pair**
+  (AH18/AH17, DIFF_SSTL12), not 125 MHz single-ended. `jepasafe_top` divides it
+  to 100 MHz with an MMCM.
+- **LEDs**: **four**, not six (D5 D6 A5 B5, LVCMOS33). `led[5:0]` could never
+  have been constrained.
+- **I/O voltage**: the PL I2C is **LVCMOS33** (N12/P12), so an MPU6050 attaches
+  with no level shifting — Gap 4 resolves favourably. The PL UART is LVCMOS18,
+  so an HC-08 on *that* path would need shifting.
+- The ZCU104 board file **is** installed, contradicting `vitis_src/README.txt`.
+
+Do not count primitives to get utilization. `get_cells -filter {REF_NAME =~
+DSP*}` reports 486 because a DSP48E2 is nine leaf cells on UltraScale+
+(54 x 9 = 486); raw `LUT*` counting ignores LUT6_2 pairing. Both Vivado scripts
+parse `report_utilization` instead.
+
+### The original plan
+
 ## Stage 6 — Vivado implementation: "it would have fit"
 
 A full synth + place & route produces the utilization and timing numbers the

@@ -27,11 +27,12 @@ Train (Keras)  →  hls4ml  →  Vitis HLS  →  Vivado  →  ZCU104
 |---|---|
 | Keras model trained | **Done** — 90.91% test accuracy, 4,374 params, 6 channels |
 | hls4ml conversion from trained weights | **Done** — 109 files |
-| Vitis HLS C synthesis | **Done** — 33,500 LUT / 54 DSP / 159 BRAM_18K, 1.60 ms, timing met at 100 MHz |
-| IP packaged for Vivado | **Done** — `nitt:hls:jepasafe:1.0` |
-| Fixed-point accuracy vs float | **Not measured** — see below |
-| RTL integration (sensor → window → alert) | **Stubs** |
-| Bitstream on hardware | **Not started — no board available** |
+| Vitis HLS C synthesis | **Done** — 1.60 ms, timing met at 100 MHz |
+| Fixed-point accuracy vs float | **Done** — `ap_fixed<16,6>` costs **0.136 points** (90.770% vs 90.906%) over all 2,947 test windows |
+| RTL integration (sensor → window → inference → alert) | **Done** — all modules implemented, 7 Icarus testbenches pass |
+| Vivado place & route + bitstream | **Done** — 15,173 LUT (6.6%), 57 DSP (3.3%), 96 BRAM_18K (15.4%), WNS +2.887 ns, DRC clean |
+| Running on hardware | **Not done — no board available.** The bitstream exists; only the download step is outstanding |
+| RTL-vs-C co-simulation | **Blocked** — `xelab.exe` is blocked by this machine's Device Guard policy |
 
 Two things a reader should know before trusting any number here:
 
@@ -46,8 +47,17 @@ Two things a reader should know before trusting any number here:
    [docs/simulation-plan.md](docs/simulation-plan.md).
 
 Since the board is unavailable, verification proceeds in simulation —
-**[docs/simulation-plan.md](docs/simulation-plan.md)** is the plan for what can
-and cannot be proven that way.
+**[docs/simulation-plan.md](docs/simulation-plan.md)** records what was proven
+that way, what is blocked, and what stays unprovable without hardware.
+
+**What is verified without a board:** the fixed-point model's accuracy over the
+full test set (csim); the preprocessing path against the core's own expected
+AXI-Stream payload, bit-for-bit within sensor quantisation; every hand-written
+RTL module by unit testbench; and that the whole design fits the real part and
+closes timing, with a real bitstream to show for it.
+
+**What is not:** the generated core's *RTL* against its C model. That needs
+co-simulation, and `xelab.exe` is blocked by Device Guard on this machine.
 
 ---
 
@@ -82,6 +92,21 @@ affine transform.
 
 ## Measured results
 
+### Accuracy: float vs fixed point
+
+Measured by csim over all 2,947 UCI HAR test windows, against the float Keras
+logits as reference:
+
+| | Accuracy | |
+|---|---|---|
+| Float (Keras) | 90.906% | baseline |
+| `ap_fixed<16,6>` | **90.770%** | **0.136-point cost** |
+| Argmax agreement | 99.729% | 8 of 2,947 flipped, 2 of them favourably |
+
+16-bit needs no retrain and no per-layer precision tuning. The flips land where
+the float model is already weak (STANDING↔SITTING, WALKING↔DOWNSTAIRS), so
+quantisation is not this model's limiting factor.
+
 ### Accuracy vs size
 
 | Model | Params | Test accuracy |
@@ -95,6 +120,25 @@ affine transform.
 |---|---|---|---|---|---|
 | 16/16/16 | 33,500 (14%) | 54 (3%) | 159 (25%) | 21,724 (4%) | 1.60 ms |
 | 64/64/64 | 126,167 (54%) | 198 (11%) | **654 (104%)** | 76,421 (16%) | 25.4 ms |
+
+Those are Vitis HLS *estimates*. Vivado place & route on the shipped 16/16/16
+design says otherwise, and the comparison is itself a result:
+
+| | csynth estimate | post-route | |
+|---|---|---|---|
+| LUT | 33,500 | **15,173** (6.6%) | over by 2.2x |
+| DSP | 54 | **57** (3.3%) | essentially exact |
+| BRAM_18K | 159 | **96** (15.4%) | over by 1.7x |
+| URAM | 0 | 0 | unused |
+
+So hls4ml/Vitis estimates run conservative on logic and memory but land exactly
+on DSP. Every "will it fit" decision in this project was made against LUT and
+BRAM figures roughly twice the truth — which means the 64/64/64 rejection at
+104% BRAM is worth re-measuring rather than trusting.
+
+The full standalone-PL top — I2C master, scaling, window buffer, argmax, MMCM
+and I/O on top of the core — adds only **660 LUTs and 3 DSPs**, and closes
+timing with WNS +2.887 ns (critical path 7.11 ns, so ~140 MHz available).
 
 Both meet 100 MHz. 64/64/64 fails on block RAM alone, by 5%. URAM is completely
 unused (0 of 96 blocks) in every run, so binding the weights there is the

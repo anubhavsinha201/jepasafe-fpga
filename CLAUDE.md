@@ -524,6 +524,43 @@ Run `python -m jepasafe.cnnlstm_keras --filters 64 --hidden 64 --dense 64`.
 Timing met at 100 MHz with 0.37 ns slack. Latency halved from the 50 MHz run, as
 expected — against a 2.56 s window it is irrelevant either way.
 
+### Measured: Vivado post-route, and how good the HLS estimate was
+
+Full standalone-PL design on `xczu7ev-ffvc1156-2-e` against the installed
+ZCU104 board file. Synthesised, placed, routed, bitstream written. Timing met,
+DRC clean.
+
+| | Core alone | Full top | % of ZU7EV |
+|---|---|---|---|
+| CLB LUTs | 14,513 | **15,173** | 6.6% |
+| CLB Registers | 19,260 | 19,565 | 4.3% |
+| DSPs | 54 | 57 | 3.3% |
+| BRAM_18K | 96 | 96 | 15.4% |
+| URAM | 0 | 0 | 0% |
+| WNS / WHS | +2.984 / +0.023 ns | **+2.887 / +0.010 ns** | met |
+
+The entire preprocessing chain — I2C master, scaling, window buffer, argmax,
+MMCM, I/O — costs **660 LUTs and 3 DSPs** on top of the core.
+
+**The csynth estimate is conservative on logic and memory, exact on DSP:**
+
+| | csynth | post-route | |
+|---|---|---|---|
+| LUT | 33,500 | 15,173 | over by 2.2x |
+| DSP | 54 | 54 | exact |
+| BRAM_18K | 159 | 96 | over by 1.7x |
+
+This matters for every "will it fit" call in this document: they were all made
+against LUT and BRAM figures roughly twice the truth. The Tang Nano rejection
+stands regardless (it was over by 4x), but **the 64/64/64 rejection at 654
+BRAM_18K = 104% deserves a re-measure** — if the estimate runs 1.7x high there,
+the full-size model may actually fit, which would recover the 1.18 accuracy
+points for free.
+
+Beware of counting primitives to get these numbers. `get_cells -filter
+{REF_NAME =~ DSP*}` reports 486, because a DSP48E2 is nine leaf cells on
+UltraScale+ (54 x 9 = 486). `report_utilization` is the authority.
+
 ### Accuracy vs size
 
 | Model | Params | Test accuracy |
@@ -786,9 +823,9 @@ the report needs, so write them down while they are fresh. Record, every time
 - [x] Confirm Vivado licence covers XCZU7EV — **yes**. `get_parts` finds `xczu7ev-ffvc1156-2-e` and `synth_design` runs. The ZCU104 board file is installed too (`xilinx.com:zcu104:part0:1.1`), contradicting `vitis_src/README.txt`
 - [x] Fixed-point accuracy measured against float — **90.770% vs 90.906%, a 0.136-point cost** at `ap_fixed<16,6>` over all 2,947 test windows (csim, 2026-10-19). `compile()`/WSL turned out to be unnecessary: csim gives the same logits
 - [ ] Cosim pass (RTL vs C) on the chosen model
-- [ ] HLS output packaged as IP, block design built
+- [x] HLS output packaged as IP (`ip_repo/jepasafe_1_0/`). No block design needed — the standalone-PL route instantiates the core RTL directly in `rtl/jepasafe_top.v`
 - [x] Alert logic redefined for class logits — `rtl/argmax6.v` replaces the single-byte threshold compare. `ALERT_CLASSES` defaults to `6'b000000`, because none of the six UCI HAR activities is an emergency
-- [ ] Bitstream with inference running on the board
+- [x] **Bitstream built** — `vivado/top_impl/jepasafe_top.bit`, timing met (WNS +2.887 ns), DRC clean. Not yet *run* on hardware: the board is unavailable, so the download step is the one thing outstanding
 - [x] Sensor integration — `rtl/mpu6050_i2c.v` implemented and verified against a behavioural slave (`rtl/tb/mpu6050_model.v`); `tb_preproc_chain` drives recorded UCI HAR data through the real scaling and windowing path
 - [ ] Demo video (2–3 min) and presentation
 - [ ] Code pushed to GitHub

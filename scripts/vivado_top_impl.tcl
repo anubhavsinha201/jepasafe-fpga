@@ -59,19 +59,36 @@ report_clock_utilization  -file $outdir/clock_utilization.rpt
 report_io                 -file $outdir/io.rpt
 report_drc                -file $outdir/drc.rpt
 
+# Pull a row out of report_utilization. Counting primitives with
+# `get_cells -filter {REF_NAME =~ DSP*}` is WRONG on UltraScale+: a DSP48E2 is
+# modelled as nine leaf cells (DSP_ALU, DSP_MULTIPLIER, DSP_PREADD_DATA, ...),
+# so that filter reported 486 DSPs for a design that uses 54. Raw LUT* counting
+# is wrong too, since it ignores LUT6_2 pairing. The report is authoritative.
+proc util_row {report name} {
+    foreach line [split $report \n] {
+        set parts [split $line |]
+        if {[llength $parts] < 3} continue
+        if {[string trim [lindex $parts 1]] eq $name} {
+            set v [string trim [lindex $parts 2]]
+            if {[string is integer -strict $v]} { return $v }
+        }
+    }
+    return "n/a"
+}
+
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup]]
 set whs [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -hold]]
 
-set n_lut  [llength [get_cells -hier -quiet -filter {REF_NAME =~ LUT*}]]
-set n_ff   [llength [get_cells -hier -quiet -filter {REF_NAME =~ FD*}]]
-set n_dsp  [llength [get_cells -hier -quiet -filter {REF_NAME =~ DSP*}]]
-set n_b36  [llength [get_cells -hier -quiet -filter {REF_NAME =~ RAMB36*}]]
-set n_b18  [llength [get_cells -hier -quiet -filter {REF_NAME =~ RAMB18*}]]
-set n_uram [llength [get_cells -hier -quiet -filter {REF_NAME =~ URAM*}]]
+set _u [report_utilization -return_string]
+set n_lut  [util_row $_u "CLB LUTs"]
+set n_ff   [util_row $_u "CLB Registers"]
+set n_dsp  [util_row $_u "DSPs"]
+set n_bram [util_row $_u "Block RAM Tile"]
+set n_uram [util_row $_u "URAM"]
 
 puts "### RESULT part=$part board=$board"
-puts "### LUT=$n_lut  FF=$n_ff  DSP=$n_dsp  RAMB36=$n_b36  RAMB18=$n_b18  URAM=$n_uram"
-puts "### BRAM_18K equivalent = [expr {$n_b36 * 2 + $n_b18}]"
+puts "### LUT=$n_lut  FF=$n_ff  DSP=$n_dsp  BRAM_TILE=$n_bram  URAM=$n_uram"
+puts "### BRAM_18K equivalent = [expr {$n_bram * 2}]"
 puts "### WNS=$wns ns  WHS=$whs ns"
 
 if {$wns >= 0 && $whs >= 0} {
