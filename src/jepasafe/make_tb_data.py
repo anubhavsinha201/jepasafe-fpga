@@ -104,6 +104,41 @@ def make(num_vectors: int | None, model_path: Path, out_dir: Path) -> None:
     print("  python -m jepasafe.export_hls")
 
 
+def counts(window: int, out_dir: Path) -> None:
+    """Emit one window as raw MPU6050 int16 counts, for the RTL preprocessing test.
+
+    The inverse of sample_scale.v: turn the physical units the model trains on
+    back into the register values a real sensor would have produced, so the
+    testbench exercises the scaling path instead of bypassing it.
+
+        accel  count = g     * 8192                (+/-4 g)
+        gyro   count = rad/s * 65.5 * 180/pi       (+/-500 deg/s)
+
+    Round-tripping counts -> ap_fixed<16,6> rounds twice, so a beat can land one
+    LSB (2^-10) away from the directly-converted value. That is a property of
+    the sensor's quantisation, not an RTL bug, which is why the testbench allows
+    1 LSB and reports how many beats matched exactly.
+    """
+    x, _ = load("test")
+    w = x[window]
+    acc = np.clip(np.rint(w[:, 0:3] * 8192.0), -32768, 32767).astype(np.int64)
+    gyro = np.clip(np.rint(w[:, 3:6] * 65.5 * 180.0 / np.pi), -32768, 32767).astype(np.int64)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # One line per beat: 6 counts as 16-bit hex, channel 0 first, so the
+    # testbench can $readmemh straight into a packed 96-bit word.
+    lines = []
+    for t in range(w.shape[0]):
+        vals = list(acc[t]) + list(gyro[t])
+        lines.append("".join(f"{v & 0xFFFF:04x}" for v in reversed(vals)))
+    (out_dir / "counts_window.hex").write_text("\n".join(lines) + "\n")
+
+    print(f"window {window} -> {out_dir / 'counts_window.hex'}  ({w.shape[0]} beats)")
+    print(f"  accel count range {acc.min()}..{acc.max()}  gyro {gyro.min()}..{gyro.max()}")
+    print(f"  beat 0 counts: {list(acc[0]) + list(gyro[0])}")
+    print(f"  beat 0 physical: {np.round(w[0], 5).tolist()}")
+
+
 def read_log(path: Path) -> np.ndarray:
     """Parse a csim / cosim results log into (n, 6) logits."""
     rows = [
@@ -234,6 +269,9 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--against", type=Path, default=None,
                    help="a second log that must be bit-identical (csim vs cosim)")
 
+    n = sub.add_parser("counts", help="one window as raw MPU6050 int16 counts")
+    n.add_argument("--window", type=int, default=0)
+
     sub.add_parser("selfcheck", help="no data, model, or HLS tools needed")
 
     args = p.parse_args(argv)
@@ -241,6 +279,8 @@ def main(argv: list[str] | None = None) -> None:
         make(args.num_vectors, args.model, args.out_dir)
     elif args.cmd == "compare":
         compare(args.log, args.out_dir, args.against)
+    elif args.cmd == "counts":
+        counts(args.window, args.out_dir)
     else:
         selfcheck()
 
