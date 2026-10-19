@@ -2,12 +2,20 @@
 
 *How to finish JEPASafe without a ZCU104 on the desk. Written 2026-10-19.*
 
-> **Progress, same day.** Stage 0 and Stage 2 are **done**. `ap_fixed<16,6>`
+> **Progress, same day.** Stage 0 and Stage 2 are **done**: `ap_fixed<16,6>`
 > costs **0.136 accuracy points** (90.770% vs 90.906% float) over all 2,947
-> test windows. Stage 3 (cosim) is running. Two estimates in this document were
-> wrong and are corrected in place: csim takes ~11 minutes for the full test
-> set, not "minutes", and `compile()` / WSL turned out to be unnecessary
-> entirely.
+> test windows, and `compile()` / WSL turned out to be unnecessary entirely.
+>
+> **Stage 3 and Stage 5 are blocked**: `xelab.exe` is blocked by this machine's
+> Device Guard policy, so xsim cannot run. Vivado itself is unaffected, so
+> Stage 6 is now the highest-value next step. The Icarus fallback gets 5 of 6
+> pipeline stages clean but breaks on the dataflow FIFO handshake — see Stage 3
+> for the full record and the two robust routes.
+>
+> Corrections to this document's own earlier estimates: csim takes ~11 minutes
+> for the full test set, not "minutes"; and the claim that Icarus could
+> "plausibly elaborate the whole core" was right about elaboration but wrong to
+> imply simulation would follow.
 
 The board is unavailable. This plan replaces every claim the hardware would
 have supported with a claim simulation can support, and states plainly which
@@ -178,7 +186,73 @@ always been its accuracy cost. One extra csim run supplies it.
 
 ---
 
-## Stage 3 — cosim: does the RTL match the C?
+## Stage 3 — cosim: does the RTL match the C? ⛔ BLOCKED
+
+**`xelab.exe` is blocked by this machine's Device Guard policy**, so no xsim
+simulation can start — xelab builds the snapshot xsim loads. Scoped precisely:
+`vivado`, `xsim`, `xvlog` and `xsc` all run; only `xelab` is blocked. Stage 6 is
+therefore unaffected. The Oct 1 cosim left `xsim.dir` artifacts behind, so the
+policy landed after that date.
+
+**The Icarus fallback got close but does not work.** Recorded in full because
+the parts that *do* work are reusable, and because the failure is instructive:
+
+| Step | Result |
+|---|---|
+| Icarus elaborates all 66 files of the core | ✅ exit 0, no vendor primitives |
+| Weight ROMs load under Icarus | ✅ `rom[0]` = `019c`, matches the `.dat` |
+| Transaction vectors recovered from the aborted cosim | ✅ exact ground truth, see below |
+| Bit layout decoded and confirmed | ✅ logit 0 of tx 0 = −7.22461, matches csim |
+| Core produces correct logits | ❌ all X |
+
+The root cause is that **Vitis RTL relies on FPGA power-up-zero semantics**.
+Only 24 of the 66 modules carry a "power-on initialization" block; xsim models
+power-up-zero, Icarus applies strict Verilog X propagation, so uninitialised
+state poisons the datapath.
+
+`scripts/zeroinit_rtl.py` addresses that by injecting `initial` zero-init into a
+*copy* of the RTL (never the synthesis source). It got conv1, relu1, conv2,
+relu2 **and the LSTM** all clean — 5 of 6 stages. But the final Dense still
+emits X, and the deeper symptom is worse: at the moment the output goes valid,
+**pooling has written 113 words while conv2 has written only 48**. Pooling
+cannot legitimately produce more data than its upstream supplied, so the
+inter-stage FIFO handshake is not being honoured and stages are reading empty
+FIFOs. The design also asserts `ap_done` at cycle 62,830 when one inference
+needs ~160,000.
+
+Fixing that means reasoning about the correct power-up value of every FIFO
+control register individually. That is unbounded, fragile work on generated
+RTL, and patched-for-simulation RTL diverges from what actually gets
+synthesised. **Not recommended.** Two robust routes instead:
+
+1. **Verilator** — 2-state with zero-init by default, which is exactly these
+   semantics, by design rather than by patching. Version 5.032 is in WSL's apt
+   and g++ is already there; `--binary` would run `tb_jepasafe_core.v` nearly
+   as-is. Needs a sudo password in WSL.
+2. **An IT exception for `xelab.exe`** — then standard cosim works with no extra
+   code at all and hls4ml's own harness does the comparison. Worth filing
+   regardless, since it also unblocks Stage 5.
+
+### What is already built and survives either route
+
+`scripts/tv_to_hex.py` recovers the exact AXI-Stream payloads and expected
+outputs that the instrumented C testbench wrote before xelab failed:
+
+    sim/tv/cdatafile/c.jepasafe.autotvin_imu_window.dat    60 x 128 beats of 96 bit
+    sim/tv/cdatafile/c.jepasafe.autotvout_layer14_out.dat  60 x 384 bit
+
+These are ground truth from the C model **in the RTL's own bit layout**, which
+removes every question about how 6 channels pack into 96 bits. Confirmed from
+the data itself: the last 16 nibbles of a word are logit 0, scaled by 2⁻²⁰, and
+transaction 0 decodes to −7.22461 — csim's first value exactly.
+
+`rtl/tb/tb_jepasafe_core.v` drives those vectors with `ap_start` tied high and
+compares the 37-bit logit fields rather than raw 384-bit words, so it is immune
+to lane-padding convention. It is simulator-agnostic plain Verilog.
+
+### The original plan, for whichever route unblocks
+
+Same vectors, now through the actual generated Verilog, driven by xsim.
 
 Same vectors, now through the actual generated Verilog, driven by xsim.
 
@@ -407,8 +481,9 @@ half a day and everything else depends on it.
 
 | Priority | Stages | Needs | Closes |
 |---|---|---|---|
-| 1 | 0, 2, 3 | Python + Vitis HLS (both installed) | fixed-point accuracy; RTL-vs-C |
-| 2 | 6 | Vivado + licence check + `.xdc` | "it fits and meets timing" |
+| ~~1~~ done | 0, 2 | Python + Vitis HLS | fixed-point accuracy — **0.136-point cost measured** |
+| **1** | 6 | Vivado + licence check + `.xdc` | "it fits and meets timing" — **now the best next step, Vivado is not blocked** |
+| blocked | 3 | Verilator, or an xelab exception | RTL-vs-C |
 | 3 | 4, 5 | the real RTL work | end-to-end chain |
 | 4 | 7 | the above | the deliverable |
 | optional | 1 | WSL env | faster precision sweeps |

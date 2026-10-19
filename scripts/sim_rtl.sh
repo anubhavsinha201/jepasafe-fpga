@@ -22,8 +22,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NTX="${1:-60}"
-CORE_RTL="hls/jepasafe/jepasafe_prj/solution1/syn/verilog"
 WORK="sim/jepasafe_rtl"
+# The zero-initialised copy, not the raw generated RTL. Vitis RTL assumes
+# FPGA power-up-zero and Icarus propagates X instead, so the raw sources
+# simulate to all-X logits. See scripts/zeroinit_rtl.py.
+CORE_RTL="$WORK/rtl_zeroinit"
 export PATH="/c/iverilog/bin:$PATH"
 
 if ! command -v iverilog >/dev/null; then
@@ -31,7 +34,7 @@ if ! command -v iverilog >/dev/null; then
   exit 1
 fi
 if [ ! -d "$CORE_RTL" ]; then
-  echo "No generated RTL at $CORE_RTL — run csynth first." >&2
+  echo "No zero-init RTL at $CORE_RTL. Run: python scripts/zeroinit_rtl.py" >&2
   exit 1
 fi
 if [ ! -f "$WORK/stim_imu_window.hex" ]; then
