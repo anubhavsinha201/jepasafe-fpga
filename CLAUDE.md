@@ -782,14 +782,14 @@ the report needs, so write them down while they are fresh. Record, every time
 - [x] C synthesis read against the budget (33,500 LUT = 14% of ZU7EV)
 - [x] Board chosen — ZCU104
 - [ ] Decide 16/16/16 vs 64/64/64 for the shipped model
-- [ ] Decide standalone-PL vs PYNQ integration (Gap 0) — gates everything below
-- [ ] Confirm Vivado licence covers XCZU7EV
+- [x] Decide standalone-PL vs PYNQ integration (Gap 0) — **standalone-PL**, decided 2026-10-19. The board is unavailable, and a PYNQ flow needs the PS running Python, which cannot be simulated; an all-RTL design can be verified end to end without hardware
+- [x] Confirm Vivado licence covers XCZU7EV — **yes**. `get_parts` finds `xczu7ev-ffvc1156-2-e` and `synth_design` runs. The ZCU104 board file is installed too (`xilinx.com:zcu104:part0:1.1`), contradicting `vitis_src/README.txt`
 - [x] Fixed-point accuracy measured against float — **90.770% vs 90.906%, a 0.136-point cost** at `ap_fixed<16,6>` over all 2,947 test windows (csim, 2026-10-19). `compile()`/WSL turned out to be unnecessary: csim gives the same logits
 - [ ] Cosim pass (RTL vs C) on the chosen model
 - [ ] HLS output packaged as IP, block design built
-- [ ] Alert logic redefined for class logits
+- [x] Alert logic redefined for class logits — `rtl/argmax6.v` replaces the single-byte threshold compare. `ALERT_CLASSES` defaults to `6'b000000`, because none of the six UCI HAR activities is an emergency
 - [ ] Bitstream with inference running on the board
-- [ ] Sensor integration (or testbench feeding recorded data)
+- [x] Sensor integration — `rtl/mpu6050_i2c.v` implemented and verified against a behavioural slave (`rtl/tb/mpu6050_model.v`); `tb_preproc_chain` drives recorded UCI HAR data through the real scaling and windowing path
 - [ ] Demo video (2–3 min) and presentation
 - [ ] Code pushed to GitHub
 
