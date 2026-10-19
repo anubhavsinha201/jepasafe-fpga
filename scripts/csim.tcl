@@ -26,8 +26,22 @@ if {![file exists tb_data/tb_input_features.dat]} {
     exit 1
 }
 
-# Reuse the existing solution rather than -reset: that keeps the csynth results
-# already sitting in solution1/syn/ intact.
+# Vitis copies tb_data/ into its csim and cosim build directories and does NOT
+# refresh those copies on a re-run without -reset. Stale vectors there are
+# silent and vicious: swap in a 60-window subset, re-run, and csim happily
+# grinds through the previous 2,947 again. Purging just the copies gets fresh
+# vectors while leaving solution1/syn/ — and the csynth results — intact, which
+# is why this does not simply use -reset.
+foreach stale [list \
+        ${project_name}_prj/solution1/csim/build/tb_data \
+        ${project_name}_prj/solution1/sim/wrapc/tb_data \
+        ${project_name}_prj/solution1/sim/wrapc_pc/tb_data] {
+    if {[file exists $stale]} {
+        puts "purging stale vectors: $stale"
+        file delete -force $stale
+    }
+}
+
 open_project ${project_name}_prj
 set_top ${project_name}
 add_files firmware/${project_name}.cpp -cflags "-std=c++0x"

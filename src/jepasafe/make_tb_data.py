@@ -64,7 +64,13 @@ def stratified_indices(y: np.ndarray, n: int) -> np.ndarray:
     for cls in range(N_CLASSES):
         members = np.flatnonzero(y == cls)
         take = per_class + (1 if cls < extra else 0)
-        picked.append(members[:take])  # deterministic: no RNG to seed or drift
+        # Spread across the class rather than taking members[:take]. UCI HAR is
+        # ordered by subject, so the leading windows of each class come from the
+        # same few people and score several points below the full test set —
+        # a subset accuracy that looks like a regression when it is just a
+        # biased sample. Evenly spaced costs the same and stays deterministic.
+        step = max(1, len(members) // take)
+        picked.append(members[::step][:take])
     return np.sort(np.concatenate(picked))
 
 

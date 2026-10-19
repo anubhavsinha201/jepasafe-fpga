@@ -2,6 +2,13 @@
 
 *How to finish JEPASafe without a ZCU104 on the desk. Written 2026-10-19.*
 
+> **Progress, same day.** Stage 0 and Stage 2 are **done**. `ap_fixed<16,6>`
+> costs **0.136 accuracy points** (90.770% vs 90.906% float) over all 2,947
+> test windows. Stage 3 (cosim) is running. Two estimates in this document were
+> wrong and are corrected in place: csim takes ~11 minutes for the full test
+> set, not "minutes", and `compile()` / WSL turned out to be unnecessary
+> entirely.
+
 The board is unavailable. This plan replaces every claim the hardware would
 have supported with a claim simulation can support, and states plainly which
 claims cannot be made at all.
@@ -27,7 +34,7 @@ meaningful way, whereas every stage of the all-RTL design can be.
 
 ---
 
-## Stage 0 — Unblock: generate `tb_data/` (do this first)
+## Stage 0 — Unblock: generate `tb_data/` ✅ DONE
 
 **`hls/jepasafe/tb_data/` is empty.** This is the most important finding behind
 this plan. The testbench `vitis_src/jepasafe_test.cpp` opens
@@ -78,9 +85,23 @@ config["OutputPredictions"] = str(tb_dir / "tb_output_predictions.dat")
 `wc -l hls/jepasafe/tb_data/*.dat` must print 2947 twice. If `tb_data/` is
 still empty the rest of this document is void.
 
+**Done.** `src/jepasafe/make_tb_data.py` (`make` / `compare` / `selfcheck`) plus
+the two config keys in `export_hls.py`. Two notes from doing it:
+
+- The existing `hls/jepasafe/` project did **not** need regenerating. Its
+  `keras_model.keras` holds weights **bit-identical** to
+  `models/checkpoints/cnnlstm_keras.keras`, so copying the `.dat` files into the
+  existing `tb_data/` was enough — and that preserves the Oct 1 csynth results
+  instead of overwriting 2.4 GB. Check provenance this way before re-exporting.
+- Taking `members[:take]` for a stratified subset is a trap: UCI HAR is ordered
+  by subject, so the leading windows of each class score ~7 points below the
+  full set and the subset looks like a regression. `stratified_indices` spreads
+  the picks across each class instead (60-vector subset: 90.0%, against 90.9%
+  for the full set).
+
 ---
 
-## Stage 1 — Optional: the bit-accurate C model via `compile()`
+## Stage 1 — Optional: the bit-accurate C model via `compile()` ⟶ SKIPPED, not needed
 
 `hls_model.compile()` builds a shared library you can call from Python, which
 makes precision sweeps a one-liner. It needs bash + g++, so it fails under
@@ -93,21 +114,46 @@ you intend to sweep several precisions — then it pays for itself. Otherwise
 skip it; the WSL environment needs its own TensorFlow + hls4ml install, which
 is a long detour for one number.
 
+**Confirmed skipped.** Stage 2 delivered the number without it. CLAUDE.md
+carried "needs `compile()` via WSL" as a blocker on the fixed-point accuracy
+measurement for weeks; that was never actually true. csim was always sufficient.
+
 ---
 
-## Stage 2 — csim: fixed-point accuracy over the full test set
+## Stage 2 — csim: fixed-point accuracy over the full test set ✅ DONE
 
 This is the stage that closes the longest-standing open item in CLAUDE.md's
 checklist: *"Fixed-point accuracy measured against float"*.
 
-csim runs the C++ model, not the RTL, so all 2,947 windows are cheap — minutes,
-not hours. `build_prj.tcl` already runs csim before csynth.
+csim runs the C++ model, not the RTL, so all 2,947 windows are affordable —
+**659 s, about 4.5 windows/s**. (An earlier draft of this document said
+"minutes, not hours"; the reuse-factor loops execute their full MAC count in
+C++ even though csim does not model cycles, so budget ~11 minutes.)
 
 ```bash
 export PATH="/c/Xilinx/Vitis_HLS/2023.2/bin:$PATH"
-cd hls/jepasafe && vitis_hls -f build_prj.tcl
-# -> hls/jepasafe/tb_data/csim_results.log   (2947 lines x 6 logits)
+cd hls/jepasafe && vitis_hls -f ../../scripts/csim.tcl
+# -> jepasafe_prj/solution1/csim/build/tb_data/csim_results.log
+python -m jepasafe.make_tb_data compare <that log>
 ```
+
+`scripts/csim.tcl` runs csim alone. `build_prj.tcl` bundles csim + csynth +
+cosim + validation, and regenerates `build_opt.tcl` on every export, so
+flipping its `opt` array does not stick.
+
+**Result:**
+
+| | Accuracy | |
+|---|---|---|
+| Float (Keras) | 90.906% | baseline |
+| `ap_fixed<16,6>` | **90.770%** | **0.136-point cost** |
+| Argmax agreement | 99.729% | 8 of 2,947 flipped, 2 of them favourably |
+
+16-bit is vindicated: no retrain, no per-layer precision work. The flips sit
+exactly where the float model is already weak (STANDING↔SITTING,
+WALKING↔DOWNSTAIRS), so quantisation is not this model's limiting factor.
+
+Raw log kept at `docs/results/csim_ap16_6_full.log` as report evidence.
 
 Then compare in Python — argmax of the fixed-point logits against `y_test`, and
 separately against argmax of the Keras float logits:

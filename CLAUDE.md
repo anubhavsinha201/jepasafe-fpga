@@ -303,7 +303,7 @@ MPU6050 and HC-08 both run from **3.3 V — not 5 V**.
 | Vitis HLS | 2023.2 (`C:\Xilinx`) | C++ → RTL |
 | Vivado | 2023.2 (`C:\Xilinx`) | IP packaging, block design, synth + P&R, bitstream |
 | PYNQ | not set up | optional PS-side driver (see Gap 0) |
-| Icarus Verilog + GTKWave | | RTL simulation |
+| Icarus Verilog + GTKWave | **not installed** | `iverilog` is not on PATH, so `scripts/sim.sh` cannot run. Use Vivado's `xsim` (installed) |
 | msys64 g++, WSL Ubuntu | present | needed for hls4ml `compile()` |
 
 `qkeras` is **not** used. There is no separate quantization step: precision is an
@@ -444,8 +444,10 @@ activation `table_size`. Latency is 3.21 ms in all three — unaffected.
 Two results worth keeping:
 
 **8-bit is a real win, mostly on DSP.** LUT −26%, BRAM −31%, **DSP −70% (54 → 16,
-which fits the GW1NR-9's 20)**. Config-only, no retrain. Measure the accuracy cost
-before relying on it — that needs `compile()` (see Toolchain).
+which fits the GW1NR-9's 20)**. Config-only, no retrain. Its accuracy cost is
+still unmeasured — and since 54 DSP is 3% of the ZU7EV, there is no longer a
+reason to take the risk. One csim run would settle it if that ever changes;
+`compile()` is *not* required (see the measured 16-bit result below).
 
 **`table_size` does nothing.** Setting it to 256 on the LSTM propagates correctly
 into `parameters.h` (verified: the constant *is* 256 in the synthesised project),
@@ -455,6 +457,39 @@ a fraction of one 18 Kbit block, so 24 blocks can only mean the ROM is replicate
 for parallel access across the 4 x 16 gate values. If that is the mechanism it
 would scale with `hidden`, not with table depth — untested, and the way to test it
 is a `hidden=8` retrain.
+
+### Measured: what `ap_fixed<16,6>` actually costs in accuracy
+
+Run 2026-10-19, csim over all 2,947 UCI HAR test windows against the float
+Keras logits as reference:
+
+| | Accuracy | Note |
+|---|---|---|
+| Float (Keras) | 90.906% | the baseline |
+| `ap_fixed<16,6>` (csim) | **90.770%** | **0.136-point cost** |
+| Argmax agreement | 99.729% | 8 of 2,947 decisions flipped |
+
+Two of those 8 flips moved *toward* the correct label, so the net damage is 4
+windows. 16-bit is vindicated with no retrain and no per-layer precision work.
+
+The flips are concentrated exactly where the float model is already weak:
+STANDING↔SITTING and WALKING↔DOWNSTAIRS. Quantisation is not what limits this
+model; channel choice and the dataset are.
+
+**`compile()` is not needed for this.** The long-standing plan was to measure
+fixed-point accuracy through `hls_model.compile()`, which fails on Windows and
+needs WSL. csim produces the same fixed-point logits with no WSL involvement at
+all — `scripts/csim.tcl` runs it alone, in ~11 minutes for the full test set
+(~4.5 windows/s).
+
+**Why this was not measured sooner: `tb_data/` was empty.** `jepasafe_test.cpp`
+opens `tb_data/tb_input_features.dat`, fails, and falls through to a
+`nnet::fill_zero` branch. Every csim and cosim run before this date therefore
+classified a window of zeros — including the cosim whose report says
+`Verilog | Pass`, all five of whose result lines are byte-identical. It was a
+liveness check, not a correctness check, and nothing in the flow warns you.
+Fixed by `make_tb_data.py` plus the `InputData`/`OutputPredictions` keys that
+`export_hls.py` now sets.
 
 ### What the ZCU104 changes
 
@@ -749,7 +784,7 @@ the report needs, so write them down while they are fresh. Record, every time
 - [ ] Decide 16/16/16 vs 64/64/64 for the shipped model
 - [ ] Decide standalone-PL vs PYNQ integration (Gap 0) — gates everything below
 - [ ] Confirm Vivado licence covers XCZU7EV
-- [ ] Fixed-point accuracy measured against float (needs `compile()` via WSL)
+- [x] Fixed-point accuracy measured against float — **90.770% vs 90.906%, a 0.136-point cost** at `ap_fixed<16,6>` over all 2,947 test windows (csim, 2026-10-19). `compile()`/WSL turned out to be unnecessary: csim gives the same logits
 - [ ] Cosim pass (RTL vs C) on the chosen model
 - [ ] HLS output packaged as IP, block design built
 - [ ] Alert logic redefined for class logits
