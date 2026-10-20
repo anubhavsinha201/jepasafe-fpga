@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FPGA Reuse Factor & Clock Cycle Simulator</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --active: #22c55e;
+      --mux: #f59e0b;
+      --dsp: #8b5cf6;
+      --acc: #ec4899;
+    }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      max-width: 960px;
+      width: 100%;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.4rem;
+      color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+    }
+    .formula-bar {
+      background: #090d16;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 0.95rem;
+      margin-bottom: 20px;
+      border-left: 4px solid var(--accent);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+      background: rgba(15, 23, 42, 0.6);
+      padding: 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    label {
+      font-size: 0.85rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+    }
+    .btn-group {
+      display: flex;
+      gap: 8px;
+    }
+    button {
+      background: var(--border);
+      color: var(--text);
+      border: 1px solid #475569;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.15s;
+      flex: 1;
+    }
+    button:hover {
+      background: #475569;
+    }
+    button.active {
+      background: var(--accent);
+      color: #090d16;
+      border-color: var(--accent);
+    }
+    button.action-btn {
+      background: var(--active);
+      color: #052e16;
+      border-color: var(--active);
+    }
+    button.action-btn:hover {
+      filter: brightness(1.1);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .metric-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      padding: 12px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .metric-val {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--accent);
+      font-family: monospace;
+    }
+    .metric-label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .canvas-wrapper {
+      background: #090d16;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      position: relative;
+      overflow-x: auto;
+    }
+    svg {
+      width: 100%;
+      height: 390px;
+      min-width: 750px;
+    }
+    .node-box {
+      stroke-width: 2;
+      rx: 6;
+      transition: all 0.3s;
+    }
+    .wire {
+      fill: none;
+      stroke: #334155;
+      stroke-width: 2.5;
+      transition: stroke 0.2s, stroke-width 0.2s;
+    }
+    .wire.active-wire {
+      stroke: var(--active);
+      stroke-width: 3.5;
+      stroke-dasharray: 6 4;
+      animation: flow 0.6s linear infinite;
+    }
+    @keyframes flow {
+      to { stroke-dashoffset: -10; }
+    }
+    .clock-wave {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: monospace;
+      color: var(--active);
+    }
+    .legend {
+      display: flex;
+      gap: 20px;
+      margin-top: 14px;
+      font-size: 0.85rem;
+      color: var(--muted);
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>
+    <span>FPGA High-Level Synthesis: Reuse Factor Simulator</span>
+    <span class="clock-wave" id="clockDisplay">CLK: Cycle 0 / 1</span>
+  </h1>
+
+  <div class="formula-bar">
+    <span><strong>Target Dot Product (N=4 MACs):</strong> Y = (A·W₁) + (B·W₂) + (C·W₃) + (D·W₄)</span>
+    <span><strong>Values:</strong> A=2, W₁=3 | B=4, W₂=1 | C=1, W₃=5 | D=3, W₄=2 &rarr; <strong>Expected Y = 21</strong></span>
+  </div>
+
+  <div class="controls">
+    <div class="control-group">
+      <label>1. Select Reuse Factor (R)</label>
+      <div class="btn-group">
+        <button id="btnR1" class="active" onclick="setReuseFactor(1)">R = 1 (Parallel)</button>
+        <button id="btnR2" onclick="setReuseFactor(2)">R = 2 (Hybrid)</button>
+        <button id="btnR4" onclick="setReuseFactor(4)">R = 4 (Sequential)</button>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>2. Clock Execution Controls</label>
+      <div class="btn-group">
+        <button class="action-btn" onclick="stepClock()">Step +1 Clock Edge &rarr;</button>
+        <button id="autoBtn" onclick="toggleAuto()">Auto-Clock: OFF</button>
+        <button onclick="resetSim()">Reset</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="metrics">
+    <div class="metric-card">
+      <div class="metric-val" id="mDsp" style="color: #a78bfa;">4</div>
+      <div class="metric-label">Physical Multipliers (N / R)</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-val" id="mMux" style="color: #fbbf24;">0</div>
+      <div class="metric-label">Input MUX Switches</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-val" id="mLat" style="color: #38bdf8;">1</div>
+      <div class="metric-label">Latency (Clock Cycles = R)</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-val" id="mAcc" style="color: #f472b6;">0</div>
+      <div class="metric-label">Accumulator Register State</div>
+    </div>
+  </div>
+
+  <div class="canvas-wrapper">
+    <svg id="hwSvg" viewBox="0 0 850 380"></svg>
+    <div class="legend">
+      <div class="legend-item"><div class="dot" style="background:#1e293b; border:2px solid #64748b;"></div> Input / Weight Registers</div>
+      <div class="legend-item"><div class="dot" style="background:#451a03; border:2px solid #f59e0b;"></div> Multiplexer (MUX Routing)</div>
+      <div class="legend-item"><div class="dot" style="background:#2e1065; border:2px solid #8b5cf6;"></div> Physical DSP Multiplier</div>
+      <div class="legend-item"><div class="dot" style="background:#500724; border:2px solid #ec4899;"></div> Accumulator / Adder Tree</div>
+      <div class="legend-item"><div class="dot" style="background:#22c55e;"></div> Active Signal in Current Clock Cycle</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const inputs = [
+    { name: "A·W₁", x: 2, w: 3, prod: 6 },
+    { name: "B·W₂", x: 4, w: 1, prod: 4 },
+    { name: "C·W₃", x: 1, w: 5, prod: 5 },
+    { name: "D·W₄", x: 3, w: 2, prod: 6 }
+  ];
+
+  let R = 1;
+  let currentCycle = 0; // 0 means idle/reset, 1..R are active clock cycles
+  let accValue = 0;
+  let autoTimer = null;
+
+  function setReuseFactor(newR) {
+    R = newR;
+    document.getElementById('btnR1').classList.toggle('active', R === 1);
+    document.getElementById('btnR2').classList.toggle('active', R === 2);
+    document.getElementById('btnR4').classList.toggle('active', R === 4);
+    resetSim();
+  }
+
+  function resetSim() {
+    currentCycle = 0;
+    accValue = 0;
+    updateUI();
+  }
+
+  function stepClock() {
+    if (currentCycle >= R) {
+      currentCycle = 1;
+      accValue = 0;
+    } else {
+      currentCycle++;
+    }
+
+    // Calculate sum for this clock cycle
+    const numMults = 4 / R;
+    let cycleSum = 0;
+    for (let m = 0; m < numMults; m++) {
+      const inputIdx = m * R + (currentCycle - 1);
+      cycleSum += inputs[inputIdx].prod;
+    }
+    accValue += cycleSum;
+    updateUI();
+  }
+
+  function toggleAuto() {
+    const btn = document.getElementById('autoBtn');
+    if (autoTimer) {
+      clearInterval(autoTimer);
+      autoTimer = null;
+      btn.textContent = "Auto-Clock: OFF";
+      btn.classList.remove('active');
+    } else {
+      stepClock();
+      autoTimer = setInterval(stepClock, 1200);
+      btn.textContent = "Auto-Clock: ON";
+      btn.classList.add('active');
+    }
+  }
+
+  function updateUI() {
+    const numMults = 4 / R;
+    const numMux = R === 1 ? 0 : numMults;
+
+    document.getElementById('mDsp').textContent = numMults;
+    document.getElementById('mMux').textContent = numMux;
+    document.getElementById('mLat').textContent = R;
+    document.getElementById('mAcc').textContent = accValue;
+    document.getElementById('clockDisplay').textContent = 
+      currentCycle === 0 ? `CLK: Idle (Ready)` : `CLK: Cycle ${currentCycle} of ${R}`;
+
+    drawHardware();
+  }
+
+  function drawHardware() {
+    const svg = document.getElementById('hwSvg');
+    svg.innerHTML = '';
+
+    const numMults = 4 / R;
+    const inX = 30;
+    const muxX = 240;
+    const dspX = 430;
+    const accX = 640;
+
+    // 1. Draw Input Blocks
+    inputs.forEach((inp, idx) => {
+      const y = 35 + idx * 85;
+      const multGroup = Math.floor(idx / R);
+      const cycleMatch = (idx % R) === (currentCycle - 1);
+      const isActive = currentCycle > 0 && cycleMatch;
+
+      // Determine destination of input wire
+      const groupCenterY = R === 1 ? y : (35 + (multGroup * R * 85) + ((R - 1) * 85) / 2);
+
+      // Draw wire from Input to MUX (or directly to DSP if R=1)
+      const targetX = R === 1 ? dspX : muxX;
+      const targetY = groupCenterY + 22;
+      drawWire(svg, inX + 125, y + 22, targetX, targetY, isActive);
+
+      // Draw Input Node
+      drawBox(svg, inX, y, 125, 45, '#1e293b', isActive ? '#22c55e' : '#64748b',
+        `${inp.name} (${inp.x}×${inp.w})`, `Val = ${inp.prod}`);
+    });
+
+    // 2. Draw MUXes and DSP Multipliers
+    for (let m = 0; m < numMults; m++) {
+      const centerY = R === 1 ? (35 + m * 85) : (35 + (m * R * 85) + ((R - 1) * 85) / 2);
+      const activeIdx = m * R + (currentCycle - 1);
+      const isDspActive = currentCycle > 0;
+      const currentProd = isDspActive ? inputs[activeIdx].prod : 0;
+
+      // Draw MUX if R > 1
+      if (R > 1) {
+        drawWire(svg, muxX + 95, centerY + 22, dspX, centerY + 22, isDspActive);
+        const selText = isDspActive ? `Sel: In[${(currentCycle - 1)}]` : `Sel: Wait`;
+        drawBox(svg, muxX, centerY - 5, 95, 55, '#451a03', isDspActive ? '#22c55e' : '#f59e0b',
+          `${R}:1 MUX`, selText);
+      }
+
+      // Wire from DSP to Adder/Accumulator
+      drawWire(svg, dspX + 115, centerY + 22, accX, 185, isDspActive);
+
+      // Draw DSP Multiplier
+      drawBox(svg, dspX, centerY - 5, 115, 55, '#2e1065', isDspActive ? '#22c55e' : '#8b5cf6',
+        `DSP Mult #${m+1}`, isDspActive ? `Out = ${currentProd}` : `Idle`);
+    }
+
+    // 3. Draw Accumulator / Adder Tree
+    const isComplete = currentCycle === R;
+    const accTitle = R === 1 ? "Combinatorial Adder" : "Accumulator Reg";
+    const accSub = currentCycle === 0 ? "Sum = 0" : `Sum = ${accValue} ${isComplete ? '✓' : ''}`;
+    drawBox(svg, accX, 145, 165, 80, '#500724', isComplete ? '#22c55e' : '#ec4899', accTitle, accSub);
+  }
+
+  function drawWire(svg, x1, y1, x2, y2, active) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const midX = (x1 + x2) / 2;
+    path.setAttribute("d", `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`);
+    path.setAttribute("class", active ? "wire active-wire" : "wire");
+    svg.appendChild(path);
+  }
+
+  function drawBox(svg, x, y, w, h, fill, stroke, title, subtitle) {
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", x);
+    rect.setAttribute("y", y);
+    rect.setAttribute("width", w);
+    rect.setAttribute("height", h);
+    rect.setAttribute("fill", fill);
+    rect.setAttribute("stroke", stroke);
+    rect.setAttribute("class", "node-box");
+    g.appendChild(rect);
+
+    const t1 = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t1.setAttribute("x", x + w / 2);
+    t1.setAttribute("y", y + h / 2 - 4);
+    t1.setAttribute("text-anchor", "middle");
+    t1.setAttribute("fill", "#f8fafc");
+    t1.setAttribute("font-size", "13px");
+    t1.setAttribute("font-weight", "bold");
+    t1.textContent = title;
+    g.appendChild(t1);
+
+    const t2 = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t2.setAttribute("x", x + w / 2);
+    t2.setAttribute("y", y + h / 2 + 14);
+    t2.setAttribute("text-anchor", "middle");
+    t2.setAttribute("fill", "#cbd5e1");
+    t2.setAttribute("font-size", "11.5px");
+    t2.setAttribute("font-family", "monospace");
+    t2.textContent = subtitle;
+    g.appendChild(t2);
+
+    svg.appendChild(g);
+  }
+
+  // Initialize on load
+  updateUI();
+</script>
+</body>
+</html>

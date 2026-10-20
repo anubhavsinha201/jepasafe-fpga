@@ -227,8 +227,7 @@ dependencies. Only the three IBM Plex faces come off the network; without it the
 page falls back to the stacks declared beside them and everything else,
 including the simulation, still runs.
 
-To publish it instead: **Settings → Pages → Source: deploy from branch → `main`
-/ `docs`**, which serves it at `https://anubhavsinha201.github.io/jepasafe-fpga/`.
+It is also published at **<https://anubhavsinha201.github.io/jepasafe-fpga/>** — see the bottom of this file.
 
 ## Quickstart
 
@@ -357,6 +356,31 @@ Recognition Using Smartphones*, ESANN.
 - [hls4ml documentation](https://fastmachinelearning.org/hls4ml/) ·
   [tutorials](https://github.com/fastmachinelearning/hls4ml-tutorial)
 - Anguita, D. et al. (2013). ESANN — the UCI HAR dataset paper.
+
+---
+
+## Live demo
+
+### → **[https://anubhavsinha201.github.io/jepasafe-fpga/](https://anubhavsinha201.github.io/jepasafe-fpga/)**
+
+The whole project as one page, including a **live simulation of the accelerator
+running a recorded session**: 3.4 minutes of real motion from the UCI HAR test
+set — lying down, walking, climbing and descending stairs, standing — streamed
+at 50 Hz as the MPU6050 register values a real sensor would have produced.
+
+As it plays you see the six sensor channels scrolling, the `window_buffer`
+filling to 128 samples, `ap_done` firing every 2.56 s, the six class logits,
+the ZCU104's four user LEDs carrying the class index on their real pins, and a
+timeline scoring each decision against ground truth.
+
+**Nothing is simulated twice.** The logits are the raw `ap_fixed<37,17>`
+integers that bit-accurate C simulation of the synthesised design produced,
+replayed rather than recomputed, so every number on screen is one the hardware
+would emit. The run scores 93.75% (75 of 80 windows), consistent with the
+90.77% measured across the full test set.
+
+Run it locally instead with the command under
+[The project page](#the-project-page) above.
 
 ---
 
