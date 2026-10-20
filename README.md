@@ -208,6 +208,28 @@ nonlinearities. Against the GW1NR-9 the design measures 414% LUT / 270% DSP /
 
 ---
 
+## The project page
+
+A self-contained showcase page lives at [docs/index.html](docs/index.html): the
+measured results, the resource and timing numbers, the verification ledger, and
+a live replay of a recorded 3.4-minute session driven by the accelerator's own
+fixed-point outputs.
+
+Serve it locally:
+
+```bash
+python -m http.server 8000 --directory docs
+# then open http://localhost:8000
+```
+
+Opening the file directly also works — it has no build step and no local
+dependencies. Only the three IBM Plex faces come off the network; without it the
+page falls back to the stacks declared beside them and everything else,
+including the simulation, still runs.
+
+To publish it instead: **Settings → Pages → Source: deploy from branch → `main`
+/ `docs`**, which serves it at `https://anubhavsinha201.github.io/jepasafe-fpga/`.
+
 ## Quickstart
 
 ```bash
